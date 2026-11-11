@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline-suite:
+    name: offline suite (no DSH needed)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: syntax check every shipped module
+        run: |
+          node --check index.js
+          node --check client.js
+          for file in lib/*.js scripts/*.mjs; do node --check "$file"; done
+      - name: offline integration suite
+        run: node scripts/it-local.mjs
+      - name: fail if the run left state behind
+        run: test ! -e bridge.json && test ! -e audit.jsonl

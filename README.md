@@ -1,5 +1,8 @@
 # dsh-lan-bridge
 
+[![ci](https://github.com/zq0929/dsh-lan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/zq0929/dsh-lan-bridge/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 让**同一个局域网里的另一台 DSH**（它的 agent，不是你的人手）读取、发指令、取消**本机**的 DSH 会话；
 反过来本机也能驱动对端。一句话：agent 跨机器接管另一个 agent 的会话，而不是人肉开两个窗口。
 
