@@ -1058,6 +1058,25 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   await uiCall('revoke', { name: 'it-ui-default' })
 }
 
+// --- every tool render survives an empty payload ------------------------
+{
+  steps.push('')
+  steps.push('tool renderers')
+  // A renderer that throws fails the whole call even though the data arrived
+  // (the peer hit exactly that on `lan_dsh_peers` in 0.3.5). An empty payload is
+  // the cheapest shape every renderer has to tolerate.
+  for (const [name, definition] of tools) {
+    let problem = null
+    try {
+      const out = definition.output.render({}, {})
+      if (!Array.isArray(out) || out.some(part => typeof part?.text !== 'string')) problem = 'render did not return text parts'
+    } catch (error) {
+      problem = String(error).slice(0, 120)
+    }
+    check(`renderer of ${name} survives an empty payload`, problem === null, problem ?? '')
+  }
+}
+
 // --- mDNS codec ----------------------------------------------------------
 {
   steps.push('')

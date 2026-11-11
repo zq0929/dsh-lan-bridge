@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.5", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.6", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -287,7 +287,7 @@ them. Prefix `/api/lan-bridge`.
                 "tls": null, "discovery": true },
   "discovery": { "enabled": true, "listening": true, "error": null,
                  "found": [ { "name": "my-pc", "host": "my-pc.local", "port": 5977,
-                              "address": "192.168.1.9", "version": "0.3.5", "protocol": "1" } ] },
+                              "address": "192.168.1.9", "version": "0.3.6", "protocol": "1" } ] },
   "addresses": ["127.0.0.1", "192.168.1.8"],
   "restartRequired": false
 }
