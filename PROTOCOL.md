@@ -386,6 +386,15 @@ record for the first non-loopback IPv4 address. Announcements repeat every
 `lan_dsh_peers action=discover` browses for 1.5 s and returns
 `{ name, address, port, version, url, known }` per bridge heard.
 
+The switch takes effect on save: turning it on starts the responder, turning it off stops
+it. A Host older than 0.3.9 needs a restart for either direction.
+
+**mDNS is link-local.** `224.0.0.251` is not routed, so discovery only crosses machines
+that share a link (same subnet, or one bridged/VPN segment). Two machines that can reach
+each other's unicast port but sit behind a router will not see each other this way — that
+is a property of mDNS, not of the bridge. In that case give the address by hand
+(`lan_dsh_peers action=add`), which works regardless of topology.
+
 Discovery is advertisement only. It carries **no token** and grants nothing: a
 discovered machine is a candidate, and driving it still needs a paired bearer
 token (`lan_dsh_peers action=add`) and an explicitly shared Session. That split

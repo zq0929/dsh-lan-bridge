@@ -225,6 +225,11 @@ lan_dsh_task action=transfer peer=windows taskId=t-abc to=lead-mac      # 让 wi
 
 ### 局域网发现：不用再问"你的 IP 是多少"
 
+打开开关**立即生效**（不用重启）：`syncDiscovery` 会在保存时起停 responder。但要注意 mDNS 是
+**链路本地**的（`224.0.0.251` 不过路由）——两台机器必须在同一网段/同一桥接段。能互 ping 端口却
+隔着路由（例如 `172.17.45.x` 与 `172.17.46.x` 各是一个 /24）时，发现一定失败，这时用手工
+`lan_dsh_peers action=add` 填地址即可，与拓扑无关。
+
 面板里打开 **局域网发现（mDNS）**（或 `config.discovery.enabled: true`），本机就会在局域网里广播自己：名字、监听端口、版本，以及一条 A 记录。对端一句 `lan_dsh_peers action=discover` 就能看到候选：
 
 ```

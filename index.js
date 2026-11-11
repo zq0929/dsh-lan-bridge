@@ -16,7 +16,7 @@ import { createServer } from './lib/server.js'
 import { createPeerCache, createRemote } from './lib/remote.js'
 import { installTools } from './lib/tools.js'
 import { installUi } from './lib/ui.js'
-import { createSettingsApplier, loadPersistedSettings } from './lib/settings.js'
+import { createSettingsApplier, loadPersistedSettings, syncDiscovery } from './lib/settings.js'
 import { createDiscovery } from './lib/mdns.js'
 
 /** Loader entry identity, matching the row id in `cordis.patch.yml`. */
@@ -74,8 +74,8 @@ export function apply(ctx, config) {
     // must win over the row config, so reading `cfg` before `ready` would start
     // (or skip) the responder based on the wrong value.
     void ready.then(() => {
-      if (stopped || cfg.discovery.enabled !== true) return
-      void discovery.start()
+      if (stopped) return
+      void syncDiscovery(discovery, cfg.discovery.enabled === true)
     })
     return () => {
       if (stopped) return
@@ -84,7 +84,7 @@ export function apply(ctx, config) {
     }
   }, 'lan-bridge: mdns')
 
-  const applySettings = createSettingsApplier({ cfg, store, server, logger, ready })
+  const applySettings = createSettingsApplier({ cfg, store, server, logger, ready, discovery })
 
   if (cfg.controlling) {
     installTools({ ctx, cfg, store, remote, server, logger, peerCache, discovery })

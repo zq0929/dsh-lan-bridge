@@ -285,7 +285,18 @@ ctx.provide('connection', {
     },
   },
 })
-const applySettings = createSettingsApplier({ cfg, store, server, logger: ctx.logger, ready: Promise.resolve() })
+// A stand-in responder: the applier only needs to see whether it is listening
+// and to be told to converge. Keeping it here means the "the switch does
+// something" assertions run the same code the panel hits.
+const discoveryProbe = {
+  listening: false,
+  starts: 0,
+  stops: 0,
+  status() { return { listening: this.listening } },
+  async start() { this.starts += 1; this.listening = true },
+  stop() { this.stops += 1; this.listening = false },
+}
+const applySettings = createSettingsApplier({ cfg, store, server, logger: ctx.logger, ready: Promise.resolve(), discovery: discoveryProbe })
 installUi({ ctx, cfg, store, server, remote, peerCache, logger: ctx.logger, ready: Promise.resolve(), applySettings })
 
 async function uiCall(name, payload) {
@@ -1006,6 +1017,15 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('renamed value persisted', (await store.settings()).name, 'renamed-it')
   const nameOnlyChange = await uiCall('settings', { trustedHosts: ['peer.local:5977'] })
   equal('a patch without a name keeps the current one', nameOnlyChange.state.settings.name, 'renamed-it')
+
+  // The mDNS switch must act on save, not on the next Host start.
+  const discoveryOn = await uiCall('settings', { discovery: true })
+  equal('discovery switch saved', discoveryOn.ok, true)
+  equal('discovery switch starts the responder immediately', discoveryProbe.listening, true)
+  equal('discovery switch applied to the live config', cfg.discovery.enabled, true)
+  await uiCall('settings', { discovery: false })
+  equal('discovery switch stops the responder immediately', discoveryProbe.listening, false)
+  equal('discovery is off in the live config again', cfg.discovery.enabled, false)
 
   const created = await uiCall('settings', { allowPeersToCreateSessions: true })
   equal('create-session switch saved', created.ok, true)
