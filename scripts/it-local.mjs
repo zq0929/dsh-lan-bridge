@@ -1118,6 +1118,22 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
     const entry = found.find(candidate => candidate.name === 'it-beta')
     check('the discovered entry carries a usable address and port', typeof entry?.address === 'string' && entry?.port === betaPort, JSON.stringify(entry))
     check('a peer learns this machine in turn', (await beta.browse({ timeoutMs: 400 })).some(candidate => candidate.name === 'it-alpha'), 'beta sees alpha')
+
+    // The model-facing tool has to expose what the responder hears, or the
+    // discovery is only visible to the code that made it.
+    const discoverRegistry = new Map()
+    const miniCtx = {
+      logger: { info: () => {}, warn: () => {} },
+      effect: (run) => { const dispose = run(); return () => dispose?.() },
+      get: (service) => (service === 'tools' ? { register: (definition) => discoverRegistry.set(definition.name, definition) } : undefined),
+      on: () => () => {},
+    }
+    installTools({ ctx: miniCtx, cfg: alphaCfg, store, remote, server, logger: miniCtx.logger, peerCache, discovery: alpha })
+    const discovered = await discoverRegistry.get('lan_dsh_peers').execute({ action: 'discover', timeoutMs: 700 }, { signal: undefined })
+    const candidate = (discovered.discovered ?? []).find(entry => entry.name === 'it-beta')
+    check('peers discover lists the mDNS candidate', candidate !== undefined, JSON.stringify((discovered.discovered ?? []).map(entry => entry.name)))
+    check('the candidate carries a URL the operator can add', candidate?.url === `http://${String(candidate?.address)}:${String(betaPort)}`, JSON.stringify(candidate))
+    check('discover output is lossless JSON', undefinedPaths(discovered).length === 0, JSON.stringify(undefinedPaths(discovered)))
   }
   alpha.stop()
   beta.stop()
