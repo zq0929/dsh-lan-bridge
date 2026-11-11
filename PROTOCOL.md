@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.2", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.3", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -59,7 +59,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
     "session.intents": true,
     "tasks.list": true, "tasks.create": true, "tasks.update": true,
     "tasks.transfer": true, "tasks.adopt": true,
-    "goal.get": true, "goal.set": true,
+    "goal.get": true, "goal.set": true, "goal.clear": true,
     "approval.answer": false
   },
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
@@ -152,6 +152,7 @@ qualified as `machine/id` for that merged view.
 | `tasks.adopt` | `{ task, from }` | `{ "name": …, "adopted": true, "task": { … } }` — receiver side of a transfer |
 | `goal.get` | `{}` | `{ "name": …, "goal": { revision, title, text, updatedBy, updatedAt } }` |
 | `goal.set` | `{ expectedRevision, text, title? }` | `{ "name": …, "goal": { … } }` |
+| `goal.clear` | `{ expectedRevision }` | `{ "name": …, "goal": { … , "cleared": true } }` |
 
 Task view fields: `id`, `revision`, `subject`, `description`, `status`
 (`pending` | `in_progress` | `completed`), `blockedBy`, `writeScopes`,
@@ -159,7 +160,19 @@ Task view fields: `id`, `revision`, `subject`, `description`, `status`
 `createdBy`, `updatedBy`, `createdAt`, `updatedAt`.
 
 `tasks.update` actions: `claim`, `release`, `complete`, `reopen`, `edit`,
-`set_dependencies`, `reassign`. A write against a task this machine does not own
+`set_dependencies`, `reassign`, `delete`.
+
+`delete` is a real delete from the board and returns
+`{ deleted: true, taskId, subject, dependents }` instead of a task view. A
+tombstone (bounded to 50) keeps the id, subject, status and who removed it, so a
+reader never has to guess whether a task vanished or was never there. Deleting a
+task that other tasks are blocked by is refused with `board/conflict` and
+`details.dependents`, because those tasks would wait forever; repeat with
+`force: true` to accept that. Completed tasks may be deleted — that is how a
+board stays readable.
+
+`goal.clear` empties the document and still bumps the revision, so the next
+writer must present a revision they actually read; clearing is not "reset to 0". A write against a task this machine does not own
 is `board/not-found`; a stale `expectedRevision` is `board/conflict` with
 `details.currentRevision` and `details.task` (or `details.goal` for `goal.set`)
 attached, so the caller re-reads instead of blind-retrying. `goal.set` accepts
@@ -179,7 +192,7 @@ cannot be handed over (`bridge/forbidden`), because completed tasks stay as
 history. Both machines must know each other: the receiver needs the sender as a
 configured outbound peer, and each side presents a token the other accepts.
 
-Limits: 200 tasks, 20 blockers, 40 write scopes, 20 KB goal text.
+Limits: 200 tasks, 50 tombstones, 20 blockers, 40 write scopes, 20 KB goal text.
 
 ### `session.wait` → params `{ sessionId, timeoutMs?, maxMessages? }`
 

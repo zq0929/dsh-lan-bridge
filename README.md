@@ -137,7 +137,7 @@
 | `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复；可带 `intent` 说明意图 |
 | `lan_dsh_board` | 读共享板：两台机器的任务 + 目标文档（`machine/id` 命名空间，只读合并） |
 | `lan_dsh_task` | 在共享板上建任务 / 按 revision CAS 改任务（认领、完成、改依赖、改派）/ `action=transfer` 把任务归属交给另一台机器 |
-| `lan_dsh_goal` | 读 / CAS 写共享目标文档（"什么叫做完"写在这里） |
+| `lan_dsh_goal` | 读 / CAS 写 / 清空共享目标文档（"什么叫做完"写在这里） |
 | `lan_dsh_wait` | 继续等一个还在跑的回合 |
 | `lan_dsh_cancel` | 打断 peer 当前回合 |
 
@@ -168,6 +168,8 @@
 lan_dsh_task action=transfer taskId=t-mwbszbdv-jkn1 to=windows          # 把我这条交给 windows
 lan_dsh_task action=transfer peer=windows taskId=t-abc to=lead-mac      # 让 windows 把它那条交给我
 ```
+
+板子会脏，脏了就得能清。`taskAction=delete` 是真删，但留一块墓碑（id / 主题 / 谁删的 / 何时），所以事后还能回答"这条是删了还是从没建过"。有别的任务被它阻塞时删除会被拒（`board/conflict`，附 `dependents`），因为那些任务会永远等下去——真要删就重复一次带 `force=true`。已完成的任务也可以删：这不是抹掉历史，这是让板子保持可读。目标文档同理：`lan_dsh_goal action=clear` 清空但**仍然递增 revision**，下一个写的人必须带上真正读到的版本号，所以"清空"不会被当成"重置到 0"。
 
 转移是**搬**不是**标**：先让接收方 `tasks.adopt` 收下，成功之后才删本地那条。接收方不可达、revision 过期、或任务已完成，都会在本地原样保留 —— 不会出现"两边都没有"的空档。接收方拿到后是新的 owner，可以继续 `claim` / `complete`；记录里留 `origin.machine` 说明它从哪儿来。
 

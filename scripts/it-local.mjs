@@ -732,6 +732,64 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('board tool output stays lossless JSON', undefinedPaths(merged).join(','), '')
   await exec('lan_dsh_peers', { action: 'remove', name: 'board-peer' })
 
+  // --- deleting a task and clearing the goal ------------------------------
+  // Deleting is a real delete from the board, but a tombstone keeps the subject
+  // and who removed it; a blocker someone still waits on needs `force`.
+  const blocker = await exec('lan_dsh_task', { action: 'create', subject: 'blocking task' })
+  const dependent = await exec('lan_dsh_task', { action: 'create', subject: 'waits on the blocker', blockedBy: [blocker.task.id] })
+  const refusedDelete = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: blocker.task.id,
+    expectedRevision: blocker.task.revision,
+    taskAction: 'delete',
+  }).then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('deleting a task someone waits on is refused', String(refusedDelete.error ?? '').includes('force=true'), JSON.stringify(refusedDelete).slice(0, 200))
+  check('the refused delete kept the task', (await store.board()).tasks[blocker.task.id] !== undefined)
+  const forcedDelete = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: blocker.task.id,
+    expectedRevision: blocker.task.revision,
+    taskAction: 'delete',
+    force: true,
+  })
+  equal('forced delete succeeds', forcedDelete.deleted, true)
+  check('the task is gone', (await store.board()).tasks[blocker.task.id] === undefined)
+  const tombstone = (await store.board()).tombstones.at(-1)
+  equal('a tombstone keeps the subject', tombstone.subject, 'blocking task')
+  equal('a tombstone names who removed it', tombstone.deletedBy, cfg.name)
+  check('the dependent task survives', (await store.board()).tasks[dependent.task.id] !== undefined)
+  const staleDelete = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: dependent.task.id,
+    expectedRevision: 9,
+    taskAction: 'delete',
+  }).then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('a stale delete is refused', String(staleDelete.error ?? '').includes('revision'), JSON.stringify(staleDelete).slice(0, 200))
+  const completedDelete = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: dependent.task.id,
+    expectedRevision: dependent.task.revision,
+    taskAction: 'complete',
+  })
+  const completedDeleteNow = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: dependent.task.id,
+    expectedRevision: completedDelete.task.revision,
+    taskAction: 'delete',
+  })
+  equal('a completed task can be deleted (that is how the board stays readable)', completedDeleteNow.deleted, true)
+
+  const goalBeforeClear = (await exec('lan_dsh_goal', { action: 'get' })).goal
+  const cleared = await exec('lan_dsh_goal', { action: 'clear', expectedRevision: goalBeforeClear.revision })
+  equal('clear bumps the revision', cleared.goal.revision, goalBeforeClear.revision + 1)
+  equal('clear empties the text', cleared.goal.text, '')
+  equal('clear empties the title', cleared.goal.title, '')
+  const staleClear = await exec('lan_dsh_goal', { action: 'clear', expectedRevision: goalBeforeClear.revision })
+    .then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('a stale clear is refused', String(staleClear.error ?? '').includes('revision'), JSON.stringify(staleClear).slice(0, 200))
+  const afterClear = await exec('lan_dsh_goal', { action: 'set', expectedRevision: cleared.goal.revision, title: 'post-clear', text: 'goal is writable after a clear' })
+  equal('the goal is writable again after a clear', afterClear.goal.revision, cleared.goal.revision + 1)
+
   // --- task hand-over (ownership moves between boards) --------------------
   // A second bridge instance, because a hand-over needs a real other board;
   // pointing at our own listener cannot work (that would be a self-transfer).
