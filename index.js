@@ -35,9 +35,11 @@ export function apply(ctx, config) {
   if (cfg.name === '') cfg.name = process.env.HOSTNAME ?? 'this-machine'
 
   const store = createStore({ stateDir: cfg.stateDir, audit: cfg.audit, logger })
-  const api = createApi({ ctx, cfg, store, logger })
-  const server = createServer({ ctx, cfg, store, api, logger })
+  // The remote client is built first: handing a task over needs both halves,
+  // the api that executes the move and the client that reaches the receiver.
   const remote = createRemote({ cfg, store, logger })
+  const api = createApi({ ctx, cfg, store, logger, remote })
+  const server = createServer({ ctx, cfg, store, api, logger })
   const peerCache = createPeerCache()
 
   // Settings saved from the panel outlive the bundle row: they are stored in

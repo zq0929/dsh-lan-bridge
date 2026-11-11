@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.1", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.2", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -58,6 +58,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
     "session.archive": true, "session.unarchive": true,
     "session.intents": true,
     "tasks.list": true, "tasks.create": true, "tasks.update": true,
+    "tasks.transfer": true, "tasks.adopt": true,
     "goal.get": true, "goal.set": true,
     "approval.answer": false
   },
@@ -147,6 +148,8 @@ qualified as `machine/id` for that merged view.
 | `tasks.list` | `{}` | `{ "name": "my-mac", "tasks": [ … ] }` — this machine's tasks only |
 | `tasks.create` | `{ subject, description?, blockedBy?, writeScopes?, assignee? }` | `{ "name": …, "task": { … } }` |
 | `tasks.update` | `{ taskId, expectedRevision, action, subject?, description?, blockedBy?, assignee? }` | `{ "name": …, "task": { … } }` |
+| `tasks.transfer` | `{ taskId, to, expectedRevision? }` | `{ from, to, taskId, task }` — the task moves to `to` |
+| `tasks.adopt` | `{ task, from }` | `{ "name": …, "adopted": true, "task": { … } }` — receiver side of a transfer |
 | `goal.get` | `{}` | `{ "name": …, "goal": { revision, title, text, updatedBy, updatedAt } }` |
 | `goal.set` | `{ expectedRevision, text, title? }` | `{ "name": …, "goal": { … } }` |
 
@@ -161,6 +164,18 @@ is `board/not-found`; a stale `expectedRevision` is `board/conflict` with
 `details.currentRevision` and `details.task` (or `details.goal` for `goal.set`)
 attached, so the caller re-reads instead of blind-retrying. `goal.set` accepts
 `expectedRevision: 0` for the first write.
+
+Handing a task over: ownership belongs to the machine that holds the record, so
+a hand-over is a move, not a flag. `tasks.transfer` snapshots the task, asks `to`
+to `tasks.adopt` it, and only drops the local copy after the receiver has
+accepted — a refused or unreachable receiver therefore changes nothing on either
+side, and a task is never lost in transit. The adopted record keeps its id and
+status, gains `origin: { machine, taskId, revision, at, droppedBlockers }`, and
+blockers that point at tasks the receiving board does not know are dropped
+(a blocker nobody can complete would block the task forever). A completed task
+cannot be handed over (`bridge/forbidden`), because completed tasks stay as
+history. Both machines must know each other: the receiver needs the sender as a
+configured outbound peer, and each side presents a token the other accepts.
 
 Limits: 200 tasks, 20 blockers, 40 write scopes, 20 KB goal text.
 

@@ -258,9 +258,9 @@ const cfg = resolveConfig({
 cfg.stateDir = stateDir
 
 const store = createStore({ stateDir, audit: cfg.audit, logger: ctx.logger })
-const api = createApi({ ctx, cfg, store, logger: ctx.logger })
-const server = createServer({ ctx, cfg, store, api, logger: ctx.logger })
 const remote = createRemote({ cfg, store, logger: ctx.logger })
+const api = createApi({ ctx, cfg, store, logger: ctx.logger, remote })
+const server = createServer({ ctx, cfg, store, api, logger: ctx.logger })
 const peerCache = createPeerCache()
 
 const tools = new Map()
@@ -731,6 +731,87 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('goal tool reads the peer document', remoteGoal.goal.title, 'wire the goal tool')
   equal('board tool output stays lossless JSON', undefinedPaths(merged).join(','), '')
   await exec('lan_dsh_peers', { action: 'remove', name: 'board-peer' })
+
+  // --- task hand-over (ownership moves between boards) --------------------
+  // A second bridge instance, because a hand-over needs a real other board;
+  // pointing at our own listener cannot work (that would be a self-transfer).
+  const peerStateDir = await mkdtemp(join(tmpdir(), 'lan-bridge-peer-'))
+  const peerCfg = resolveConfig({
+    role: 'both',
+    name: 'hand-peer',
+    listen: { host: '127.0.0.1', port: 0 },
+    insecureHttp: true,
+    allowPeersToCreateSessions: false,
+    rateLimitPerMinute: 600,
+    audit: true,
+  }, { DSH_HOME: peerStateDir })
+  peerCfg.stateDir = peerStateDir
+  const peerStore = createStore({ stateDir: peerStateDir, audit: peerCfg.audit, logger: ctx.logger })
+  const peerRemote = createRemote({ cfg: peerCfg, store: peerStore, logger: ctx.logger })
+  const peerApi = createApi({ ctx, cfg: peerCfg, store: peerStore, logger: ctx.logger, remote: peerRemote })
+  const peerServer = createServer({ ctx, cfg: peerCfg, store: peerStore, api: peerApi, logger: ctx.logger })
+  await peerServer.start()
+  const peerUrl = `http://127.0.0.1:${String(peerServer.status.port)}`
+  const peerRpc = async (method, params, token) => {
+    const response = await fetch(`${peerUrl}/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id: 'hand-peer', method, params }),
+    })
+    return { status: response.status, body: await response.json() }
+  }
+  const allCaps = ['read', 'prompt', 'control', 'create', 'archive', 'collab']
+  // Each side mints the credential the other one presents.
+  const handToken = (await store.pair({ name: 'hand-peer', capabilities: allCaps })).token
+  const peerToken = (await peerStore.pair({ name: 'it-machine', capabilities: allCaps })).token
+  await store.addOutbound({ name: 'hand-peer', url: peerUrl, token: peerToken })
+  await peerStore.addOutbound({ name: 'it-machine', url, token: handToken })
+
+  // this machine → peer
+  const seeded = await exec('lan_dsh_task', { action: 'create', subject: 'hand me over', assignee: cfg.name })
+  const handed = await exec('lan_dsh_task', { action: 'transfer', taskId: seeded.task.id, to: 'hand-peer' })
+  equal('transfer reports both ends', `${handed.task === undefined ? '' : 'task'}:${String(handed.message)}`.includes('it-machine'), true)
+  equal('the task left this board', (await store.board()).tasks[seeded.task.id], undefined)
+  const peerTasks = (await peerRpc('tasks.list', {}, peerToken)).body.result.tasks
+  const adopted = peerTasks.find(task => task.id === seeded.task.id)
+  check('the peer adopted the task', adopted !== undefined, JSON.stringify(peerTasks).slice(0, 200))
+  equal('adoption records where it came from', adopted.origin.machine, cfg.name)
+  equal('the adopted task keeps its subject', adopted.subject, 'hand me over')
+
+  // a stale revision is refused and nothing moves
+  const staleSeed = await exec('lan_dsh_task', { action: 'create', subject: 'stale hand-over' })
+  const staleMove = await exec('lan_dsh_task', { action: 'transfer', taskId: staleSeed.task.id, to: 'hand-peer', expectedRevision: 9 })
+    .then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('a stale hand-over is refused', String(staleMove.error ?? '').includes('revision'), JSON.stringify(staleMove).slice(0, 200))
+  check('a refused hand-over leaves the task here', (await store.board()).tasks[staleSeed.task.id] !== undefined)
+
+  // completed tasks stay as history
+  await exec('lan_dsh_task', { action: 'update', taskId: staleSeed.task.id, expectedRevision: 1, taskAction: 'complete' })
+  const completedMove = await exec('lan_dsh_task', { action: 'transfer', taskId: staleSeed.task.id, to: 'hand-peer' })
+    .then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('a completed task cannot be handed over', String(completedMove.error ?? '').includes('completed'), JSON.stringify(completedMove).slice(0, 200))
+
+  // an unreachable receiver changes nothing
+  await store.addOutbound({ name: 'gone', url: 'http://127.0.0.1:1', token: 'lzb_gone' })
+  const unreachableSeed = await exec('lan_dsh_task', { action: 'create', subject: 'nobody home' })
+  const unreachableMove = await exec('lan_dsh_task', { action: 'transfer', taskId: unreachableSeed.task.id, to: 'gone' })
+    .then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('an unreachable receiver fails loudly', String(unreachableMove.error ?? '').length > 0, JSON.stringify(unreachableMove).slice(0, 200))
+  check('an unreachable receiver leaves the task here', (await store.board()).tasks[unreachableSeed.task.id] !== undefined)
+  await store.removeOutbound('gone')
+
+  // peer → this machine, driven from here: the peer runs the move, we adopt
+  const builtOnPeer = (await peerRpc('tasks.create', { subject: 'built on the peer' }, peerToken)).body.result.task
+  const backHome = await exec('lan_dsh_task', { action: 'transfer', peer: 'hand-peer', taskId: builtOnPeer.id, to: cfg.name })
+  equal('the peer hands its task back', backHome.ok, true)
+  check('this board now owns it', (await store.board()).tasks[builtOnPeer.id] !== undefined)
+  equal('the adopted record remembers the peer', (await store.board()).tasks[builtOnPeer.id].origin.machine, 'hand-peer')
+  check('the peer dropped its copy', (await peerRpc('tasks.list', {}, peerToken)).body.result.tasks.every(task => task.id !== builtOnPeer.id))
+  equal('hand-over output stays lossless JSON', undefinedPaths(backHome).join(','), '')
+
+  await peerServer.stop()
+  await rm(peerStateDir, { recursive: true, force: true })
+  await exec('lan_dsh_peers', { action: 'remove', name: 'hand-peer' })
 
   const removed = await exec('lan_dsh_peers', { action: 'remove', name: 'loopback' })
   equal('peer remove ok', removed.ok, true)

@@ -136,7 +136,7 @@
 | `lan_dsh_transcript` | 读 peer 某会话的历史尾部（含 `seq type` 预览） |
 | `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复；可带 `intent` 说明意图 |
 | `lan_dsh_board` | 读共享板：两台机器的任务 + 目标文档（`machine/id` 命名空间，只读合并） |
-| `lan_dsh_task` | 在共享板上建任务 / 按 revision CAS 改任务（认领、完成、改依赖、改派） |
+| `lan_dsh_task` | 在共享板上建任务 / 按 revision CAS 改任务（认领、完成、改依赖、改派）/ `action=transfer` 把任务归属交给另一台机器 |
 | `lan_dsh_goal` | 读 / CAS 写共享目标文档（"什么叫做完"写在这里） |
 | `lan_dsh_wait` | 继续等一个还在跑的回合 |
 | `lan_dsh_cancel` | 打断 peer 当前回合 |
@@ -161,6 +161,15 @@
 ### 共享板：把"做到哪一步"也送过去
 
 意图信封解决的是一句话里的"为什么"。跨机的**多回合协作**还需要一个双方都能读写的状态：谁在做什么、什么卡住什么、什么叫做完。这就是共享板（`lan_dsh_board` / `lan_dsh_task` / `lan_dsh_goal`）。
+
+**任务归属可以跨机转移。** 任务只在拥有它的那台机器上可写，这是防冲突的设计；但真协作时经常需要"这条活儿换个人干"。所以有 `lan_dsh_task action=transfer`：
+
+```
+lan_dsh_task action=transfer taskId=t-mwbszbdv-jkn1 to=windows          # 把我这条交给 windows
+lan_dsh_task action=transfer peer=windows taskId=t-abc to=lead-mac      # 让 windows 把它那条交给我
+```
+
+转移是**搬**不是**标**：先让接收方 `tasks.adopt` 收下，成功之后才删本地那条。接收方不可达、revision 过期、或任务已完成，都会在本地原样保留 —— 不会出现"两边都没有"的空档。接收方拿到后是新的 owner，可以继续 `claim` / `complete`；记录里留 `origin.machine` 说明它从哪儿来。
 
 它按"谁创建谁拥有"复制，而不是搞一个中心库：
 
