@@ -293,6 +293,12 @@ them. Prefix `/api/lan-bridge`.
 }
 ```
 
+**A panel may be newer than the Host it talks to.** The panel bundle reloads from disk on a
+page refresh, Host code only on restart, so for a while the UI is 0.3.7 and the state object
+comes from 0.3.4. Every field here is therefore additive: a consumer must treat a missing
+key as "this Host predates that feature", never as an error. (0.3.5 shipped a panel that read
+`discovery.found` unconditionally and blanked the whole section on such a Host.)
+
 `settings` is the editable posture as currently applied (`name` is the identity this machine
 advertises in `bridge.hello` and in peers' lists); `listen` is what the
 socket is actually doing (when the operator saves `port: 0`, `settings.port` stays `0`

@@ -26,5 +26,7 @@ jobs:
           for file in lib/*.js scripts/*.mjs; do node --check "$file"; done
       - name: offline integration suite
         run: node scripts/it-local.mjs
+      - name: panel smoke suite (renders the real client.js without React)
+        run: node scripts/panel-smoke.mjs
       - name: fail if the run left state behind
         run: test ! -e bridge.json && test ! -e audit.jsonl

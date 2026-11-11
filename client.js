@@ -866,7 +866,11 @@ window.__ModuleLoader__.load({
       const [saved, setSaved] = React.useState(false)
 
       // Peers this machine heard over mDNS, for the hint chips under the switch.
-      const found = record(record(data.discovery)).found
+      // `discovery` is absent on a Host older than the panel (the panel bundle
+      // reloads from disk while Host code needs a restart), so every read here
+      // has to survive its absence: a throw would blank the whole section.
+      const discovery = record(data.discovery)
+      const found = discovery === null ? [] : discovery.found
       const discovered = Array.isArray(found)
         ? found.map((entry) => ({
           name: text(record(entry).name, '?'),

@@ -266,14 +266,15 @@ discovered over mDNS:
   但没实测；插件只依赖 `node:http`/`node:crypto`/`fetch`，没有平台相关代码。
 - 依赖 DSH 的 `ctx.sessionController` / `ctx.workspaceController`（pre-stable 内部 API）。DSH 升级后
   若方法签名变动，桥会明确报 `bridge/method-unavailable`，而不是静默错乱——升级 DSH 后请跑一遍
-  `node scripts/it-local.mjs`（离线，119 项）。
+  `node scripts/it-local.mjs`（离线，266 项）。
 - 两端 `protocol` 必须一致：`bridge.hello` 会拒绝不匹配的版本。
 
 ## 贡献 / 反馈
 
 - 协议是契约，形状改动要同步改 [PROTOCOL.md](PROTOCOL.md) 并说明原因；实现细节欢迎 PR。
-- 改动后至少跑：`node scripts/it-local.mjs`（离线，无需 DSH）与 `node scripts/e2e-live.mjs`
-  （需 DSH 在跑，会临时写入并清空 `bridge.json` 的 token，但保留你保存的监听设置）。
+- 改动后至少跑：`node scripts/it-local.mjs`（离线，无需 DSH）、`node scripts/panel-smoke.mjs`
+  （渲染真实 `client.js`，不需要 React/浏览器）与 `node scripts/e2e-live.mjs`（需 DSH 在跑，
+  会临时写入 token 并在结束时把 `bridge.json` 原样恢复）。
 - 安全相关改动请顺带更新 README 的「安全模型」一节。
 
 ## 验证
@@ -281,13 +282,17 @@ discovered over mDNS:
 离线自测（不需要第二台机器，也不需要连 Host；用假 Session 跑真实监听/方法表/工具）：
 
 ```bash
-node scripts/it-local.mjs     # 68 项断言，退出码 0 = 全绿
+node scripts/it-local.mjs     # 266 项断言，退出码 0 = 全绿
+node scripts/panel-smoke.mjs  # 面板冒烟：用迷你 React 渲染真实 client.js，28 个场景
+```
 
-真机自检（App 正在运行，会临时写入并在结束时清空 `bridge.json`）：
+面板那一套是补出来的：0.3.5 有一个 bug 是"Host 比面板旧 → 面板整体白屏报『状态读取失败』"，
+因为面板读了新 Host 才有的 `discovery` 字段。这类错误在 Host 侧测试里看不见，只能渲染面板才抓得住。
+
+真机自检（App 正在运行，会临时写入并在结束时恢复 `bridge.json`）：
 
 ```bash
-node scripts/e2e-live.mjs        # 22 项：栅栏/鉴权/hello/建会话/收发/归档/只读拒绝/SSE
-```
+node scripts/e2e-live.mjs        # 24 项：栅栏/鉴权/hello/建会话/收发/归档/只读拒绝/SSE
 ```
 
 对着一台真在跑的桥做协议探测：
