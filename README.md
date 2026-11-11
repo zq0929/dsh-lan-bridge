@@ -169,7 +169,7 @@ lan_dsh_task action=transfer taskId=t-mwbszbdv-jkn1 to=windows          # 把我
 lan_dsh_task action=transfer peer=windows taskId=t-abc to=lead-mac      # 让 windows 把它那条交给我
 ```
 
-板子会脏，脏了就得能清。`taskAction=delete` 是真删，但留一块墓碑（id / 主题 / 谁删的 / 何时），所以事后还能回答"这条是删了还是从没建过"。有别的任务被它阻塞时删除会被拒（`board/conflict`，附 `dependents`），因为那些任务会永远等下去——真要删就重复一次带 `force=true`。已完成的任务也可以删：这不是抹掉历史，这是让板子保持可读。目标文档同理：`lan_dsh_goal action=clear` 清空但**仍然递增 revision**，下一个写的人必须带上真正读到的版本号，所以"清空"不会被当成"重置到 0"。
+板子会脏，脏了就得能清。`taskAction=delete` 是真删，但留一块墓碑（id / 主题 / 谁删的 / 何时），所以事后还能回答"这条是删了还是从没建过"。有别的任务被它阻塞时删除会被拒（`board/conflict`，附 `dependents`）；真要删就重复一次带 `force=true`，那时**依赖它的任务会自动去掉这个阻塞项**（revision +1，并在 `relinked` 里列出），所以不会有任务永远等一个鬼。墓碑会出现在 `lan_dsh_board` 的读结果里（最近 10 条），已完成的任务也可以删：这不是抹掉历史，这是让板子保持可读。目标文档同理：`lan_dsh_goal action=clear` 清空但**仍然递增 revision**，下一个写的人必须带上真正读到的版本号，所以"清空"不会被当成"重置到 0"。
 
 转移是**搬**不是**标**：先让接收方 `tasks.adopt` 收下，成功之后才删本地那条。接收方不可达、revision 过期、或任务已完成，都会在本地原样保留 —— 不会出现"两边都没有"的空档。接收方拿到后是新的 owner，可以继续 `claim` / `complete`；记录里留 `origin.machine` 说明它从哪儿来。
 

@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.3", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.4", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -145,7 +145,7 @@ qualified as `machine/id` for that merged view.
 
 | method | params | result |
 |---|---|---|
-| `tasks.list` | `{}` | `{ "name": "my-mac", "tasks": [ … ] }` — this machine's tasks only |
+| `tasks.list` | `{}` | `{ "name": "my-mac", "tasks": [ … ], "tombstones": [ … ] }` — this machine's tasks and its last 10 deleted ones |
 | `tasks.create` | `{ subject, description?, blockedBy?, writeScopes?, assignee? }` | `{ "name": …, "task": { … } }` |
 | `tasks.update` | `{ taskId, expectedRevision, action, subject?, description?, blockedBy?, assignee? }` | `{ "name": …, "task": { … } }` |
 | `tasks.transfer` | `{ taskId, to, expectedRevision? }` | `{ from, to, taskId, task }` — the task moves to `to` |
@@ -163,13 +163,14 @@ Task view fields: `id`, `revision`, `subject`, `description`, `status`
 `set_dependencies`, `reassign`, `delete`.
 
 `delete` is a real delete from the board and returns
-`{ deleted: true, taskId, subject, dependents }` instead of a task view. A
-tombstone (bounded to 50) keeps the id, subject, status and who removed it, so a
-reader never has to guess whether a task vanished or was never there. Deleting a
-task that other tasks are blocked by is refused with `board/conflict` and
-`details.dependents`, because those tasks would wait forever; repeat with
-`force: true` to accept that. Completed tasks may be deleted — that is how a
-board stays readable.
+`{ deleted: true, taskId, subject, dependents, relinked }` instead of a task view.
+A tombstone (bounded to 50) keeps the id, subject, status and who removed it, and
+`tasks.list` exposes the last 10, so a reader never has to guess whether a task
+vanished or was never there. Deleting a task that other tasks are blocked by is
+refused with `board/conflict` and `details.dependents`; repeat with
+`force: true` to accept it — the dependents then lose that blocker (bumped
+revision, listed in `relinked`), so nothing is left waiting on a ghost.
+Completed tasks may be deleted — that is how a board stays readable.
 
 `goal.clear` empties the document and still bumps the revision, so the next
 writer must present a revision they actually read; clearing is not "reset to 0". A write against a task this machine does not own

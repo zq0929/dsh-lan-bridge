@@ -758,6 +758,11 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('a tombstone keeps the subject', tombstone.subject, 'blocking task')
   equal('a tombstone names who removed it', tombstone.deletedBy, cfg.name)
   check('the dependent task survives', (await store.board()).tasks[dependent.task.id] !== undefined)
+  equal('a forced delete re-points its dependents', JSON.stringify((await store.board()).tasks[dependent.task.id].blockedBy), '[]')
+  check('a forced delete reports what it unblocked', forcedDelete.message.includes(dependent.task.id), String(forcedDelete.message))
+  const tombstoneReader = await store.pair({ name: 'tombstone-reader', capabilities: ['collab'] })
+  equal('the tombstone is readable over the wire', (await rpc('tasks.list', {}, { token: tombstoneReader.token })).body.result.tombstones.at(-1).subject, 'blocking task')
+  await store.revoke('tombstone-reader')
   const staleDelete = await exec('lan_dsh_task', {
     action: 'update',
     taskId: dependent.task.id,
@@ -765,10 +770,11 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
     taskAction: 'delete',
   }).then(value => value, error => ({ error: String(error?.message ?? error) }))
   check('a stale delete is refused', String(staleDelete.error ?? '').includes('revision'), JSON.stringify(staleDelete).slice(0, 200))
+  const liveDependent = (await store.board()).tasks[dependent.task.id]
   const completedDelete = await exec('lan_dsh_task', {
     action: 'update',
     taskId: dependent.task.id,
-    expectedRevision: dependent.task.revision,
+    expectedRevision: liveDependent.revision,
     taskAction: 'complete',
   })
   const completedDeleteNow = await exec('lan_dsh_task', {

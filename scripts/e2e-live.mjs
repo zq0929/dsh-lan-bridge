@@ -64,7 +64,21 @@ async function readSettings() {
   }
 }
 
+// The operator's own state (tokens, peers, shares) must survive a test run: this
+// suite borrows the live bridge, it does not own it. Everything it needs is
+// added next to the existing records, and `wipe()` puts the original back.
+let backup = null
+
+async function readDoc() {
+  try {
+    return JSON.parse(await readFile(STATE, 'utf8'))
+  } catch {
+    return { version: 1, inbound: {}, outbound: {}, shares: {}, settings: {} }
+  }
+}
+
 async function seed() {
+  backup = await readDoc()
   const settings = await readSettings()
   const doc = { version: 1, settings, inbound: {
     'e2e-full': entry(token, ['read', 'prompt', 'control', 'create', 'archive']),
@@ -74,11 +88,21 @@ async function seed() {
 }
 async function wipe() {
   const settings = await readSettings()
+  const original = backup ?? { version: 1, inbound: {}, outbound: {}, shares: {} }
   await writeFile(
     STATE,
-    JSON.stringify({ version: 1, settings, inbound: {}, outbound: {}, shares: {} }, null, 2) + '\n',
+    JSON.stringify({
+      version: 1,
+      settings,
+      inbound: original.inbound ?? {},
+      outbound: original.outbound ?? {},
+      shares: original.shares ?? {},
+      board: original.board,
+      intents: original.intents,
+    }, null, 2) + '\n',
     { mode: 0o600 },
   )
+  backup = null
   return settings
 }
 
