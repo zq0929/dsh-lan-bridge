@@ -170,7 +170,9 @@ a hand-over is a move, not a flag. `tasks.transfer` snapshots the task, asks `to
 to `tasks.adopt` it, and only drops the local copy after the receiver has
 accepted — a refused or unreachable receiver therefore changes nothing on either
 side, and a task is never lost in transit. The adopted record keeps its id and
-status, gains `origin: { machine, taskId, revision, at, droppedBlockers }`, and
+status, gains `origin: { machine, taskId, revision, at, droppedBlockers }` (the
+last hop — adopt overwrites it, so it never claims a chain the board cannot
+prove), and
 blockers that point at tasks the receiving board does not know are dropped
 (a blocker nobody can complete would block the task forever). A completed task
 cannot be handed over (`bridge/forbidden`), because completed tasks stay as
