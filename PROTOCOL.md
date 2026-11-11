@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.1.0", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.2.0", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
