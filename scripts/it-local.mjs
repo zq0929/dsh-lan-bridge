@@ -1110,6 +1110,11 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   const off = await tools.get('lan_dsh_peers').execute({ action: 'discover' }, { signal: undefined })
   check('discover explains that mDNS is off', off.ok === false && /mDNS is off/.test(off.message), JSON.stringify(off).slice(0, 160))
   check('discover still lists configured peers', Array.isArray(off.peers), `${String(off.peers?.length)} peer(s)`)
+  // Tool output is handed to the model, so a bearer token must never ride along
+  // in it. `store.outbound()` records do; described peers do not.
+  const shipped = JSON.stringify(off)
+  check('discover never ships a bearer token to the model', !/lzb_[0-9a-f]{8}/.test(shipped)
+    && (off.peers ?? []).every(peer => peer.token === undefined), shipped.slice(0, 200))
   check('discover output is lossless JSON', undefinedPaths(off).length === 0, JSON.stringify(undefinedPaths(off)))
 }
 
@@ -1149,7 +1154,10 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
     }
     installTools({ ctx: miniCtx, cfg: alphaCfg, store, remote, server, logger: miniCtx.logger, peerCache, discovery: alpha })
     const discovered = await discoverRegistry.get('lan_dsh_peers').execute({ action: 'discover', timeoutMs: 700 }, { signal: undefined })
-    const candidate = (discovered.discovered ?? []).find(entry => entry.name === 'it-beta')
+    const leaked = JSON.stringify(discovered)
+  check('live discover never ships a bearer token either', !/lzb_[0-9a-f]{8}/.test(leaked)
+    && (discovered.peers ?? []).every(peer => peer.token === undefined), leaked.slice(0, 200))
+  const candidate = (discovered.discovered ?? []).find(entry => entry.name === 'it-beta')
     check('peers discover lists the mDNS candidate', candidate !== undefined, JSON.stringify((discovered.discovered ?? []).map(entry => entry.name)))
     check('the candidate carries a URL the operator can add', candidate?.url === `http://${String(candidate?.address)}:${String(betaPort)}`, JSON.stringify(candidate))
     check('discover output is lossless JSON', undefinedPaths(discovered).length === 0, JSON.stringify(undefinedPaths(discovered)))

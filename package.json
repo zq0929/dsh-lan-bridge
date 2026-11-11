@@ -1,6 +1,6 @@
 {
   "name": "dsh-lan-bridge",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "LAN bridge: a DSH on the same local network can read, prompt and cancel this machine's DSH sessions (and this machine can drive theirs), under an explicit per-session share switch, per-peer tokens and capability bits.",
   "type": "module",
   "license": "MIT",
