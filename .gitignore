@@ -1,0 +1,12 @@
+node_modules/
+*.log
+.DS_Store
+
+# Never commit bridge state: it holds hashed peer tokens and the share list.
+bridge.json
+audit.jsonl
+*.jsonl.*
+
+# Ad-hoc local runs
+/tmp-*
+*.tmp

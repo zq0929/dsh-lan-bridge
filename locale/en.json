@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "LAN bridge",
+    "description": "A LAN bridge between this machine and trusted peers: edit the listen address and port here (including TLS, the Host allowlist and whether peers may create Sessions), see this machine's role and live listener state, decide per Session whether peers may read and drive it, and manage inbound and outbound peers, pairing and revocation."
+  }
+}

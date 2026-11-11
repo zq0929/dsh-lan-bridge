@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:#7c828c" role="img" aria-label="LAN bridge">
+  <circle cx="5.75" cy="18.25" r="2.9"/>
+  <circle cx="18.25" cy="5.75" r="2.9"/>
+  <path d="M7.85 16.15 16.15 7.85"/>
+  <path d="M11.2 12.9c1.6 0 2.6-.45 3.35-1.5"/>
+</svg>

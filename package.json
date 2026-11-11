@@ -1,0 +1,58 @@
+{
+  "name": "dsh-lan-bridge",
+  "version": "0.1.0",
+  "description": "LAN bridge: a DSH on the same local network can read, prompt and cancel this machine's DSH sessions (and this machine can drive theirs), under an explicit per-session share switch, per-peer tokens and capability bits.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "lan",
+    "remote-session",
+    "agent",
+    "session-control"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "lib/*.js",
+    "locale/*.json",
+    "icon.svg",
+    "PROTOCOL.md",
+    "README.md",
+    "scripts/*",
+    "docs/*"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings-general"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "author": "zq0929",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zq0929/dsh-lan-bridge.git"
+  },
+  "homepage": "https://github.com/zq0929/dsh-lan-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/zq0929/dsh-lan-bridge/issues"
+  }
+}

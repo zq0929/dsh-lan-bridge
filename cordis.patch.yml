@@ -1,0 +1,32 @@
+# lan-dsh-bridge: one row, all knobs. Reinstall after editing, or edit the row in
+# the profile's cordis patch to change it without touching this file.
+- insert:
+    - id: lan-bridge
+      name: 'dsh-lan-bridge'
+      config:
+        # listener | controller | both
+        role: both
+        # Peer-visible name of this machine; empty means "use the hostname".
+        name: ''
+        listen:
+          # One concrete literal of a local interface. 127.0.0.1 keeps the bridge
+          # unreachable from the LAN; use the machine's LAN IPv4 (or ::1-style
+          # IPv6) to accept peers, and set insecureHttp: true first.
+          host: 127.0.0.1
+          port: 5977
+        # Non-loopback plain-HTTP serving is refused unless this is explicitly true.
+        insecureHttp: false
+        # Optional TLS: { certFile: '/abs/path.pem', keyFile: '/abs/path.pem' }
+        tls: null
+        # Whether a paired peer may create brand-new sessions on this machine.
+        # Requires a token that carries the `create` capability as well.
+        allowPeersToCreateSessions: true
+        # Extra authorities accepted in the Host header, e.g. ['my-mac.local:5977'].
+        trustedHosts: []
+        # Safety rails.
+        maxPromptBytes: 16384
+        maxWaitMs: 600000
+        maxMessages: 200
+        maxBodyBytes: 1048576
+        rateLimitPerMinute: 120
+        audit: true

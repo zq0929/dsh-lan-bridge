@@ -1,0 +1,679 @@
+/**
+ * Offline integration test for the bridge.
+ *
+ * It runs the real listener, the real method table, the real store and the real
+ * tools against a *fake* Host context: a stand-in `sessionController` with a
+ * couple of in-memory Sessions. That covers everything a plugin owns — fence,
+ * auth, capability bits, share gating, RPC framing, SSE framing, prompt→wait,
+ * cancel, audit, rate limiting and the model-facing tools — without needing a
+ * second machine or a running DSH.
+ *
+ *   node scripts/it-local.mjs
+ *
+ * Exit code 0 = every assertion passed.
+ */
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createStore } from '../lib/store.js'
+import { createApi } from '../lib/api.js'
+import { createServer } from '../lib/server.js'
+import { request as requestFn } from 'node:http'
+import { createPeerCache, createRemote } from '../lib/remote.js'
+import { installTools } from '../lib/tools.js'
+import { installUi } from '../lib/ui.js'
+import { createSettingsApplier, loadPersistedSettings } from '../lib/settings.js'
+import { localAddresses, resolveConfig } from '../lib/config.js'
+
+let failures = 0
+let passes = 0
+const steps = []
+
+function check(label, condition, detail) {
+  if (condition) {
+    passes += 1
+    steps.push(`  ok   ${label}`)
+    return
+  }
+  failures += 1
+  steps.push(`  FAIL ${label}${detail === undefined ? '' : ` — ${detail}`}`)
+}
+
+function equal(label, actual, expected) {
+  check(label, actual === expected, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
+}
+
+// ---------------------------------------------------------------------------
+// A minimal Cordis-shaped context: event bus, effects, service lookup.
+// ---------------------------------------------------------------------------
+function createFakeCtx() {
+  const handlers = new Map()
+  const services = new Map()
+  const disposers = []
+  const ctx = {
+    logger: { info() {}, warn() {}, error() {} },
+    on(name, handler) {
+      let set = handlers.get(name)
+      if (set === undefined) {
+        set = new Set()
+        handlers.set(name, set)
+      }
+      set.add(handler)
+      return () => set.delete(handler)
+    },
+    emit(name, ...args) {
+      for (const handler of [...(handlers.get(name) ?? [])]) handler(...args)
+    },
+    effect(factory) {
+      const dispose = factory()
+      disposers.push(dispose)
+      return dispose
+    },
+    get(name) {
+      return services.get(name)
+    },
+    provide(name, value) {
+      services.set(name, value)
+    },
+    async dispose() {
+      for (const dispose of disposers.reverse()) {
+        if (typeof dispose === 'function') await dispose()
+      }
+    },
+  }
+  return ctx
+}
+
+// ---------------------------------------------------------------------------
+// A stand-in Session Controller with real enough timing.
+// ---------------------------------------------------------------------------
+function createFakeSessions(ctx) {
+  const sessions = new Map()
+
+  function put(session) {
+    sessions.set(session.summary.sessionId, session)
+    return session
+  }
+
+  function create({ sessionId, title, running = false, records = [] }) {
+    const session = {
+      summary: {
+        sessionId,
+        agentAvailable: true,
+        updatedAt: Date.now(),
+        running,
+        blank: records.length === 0,
+        cwd: '/tmp',
+        projections: { values: { title } },
+      },
+      title,
+      records: [],
+      cursor: 0,
+      waiters: new Set(),
+    }
+    for (const record of records) append(session, record.type, record.data)
+    return put(session)
+  }
+
+  function append(session, type, data) {
+    session.cursor += 1
+    session.records.push({ type: 'event', event: { type, seq: session.cursor, time: Date.now(), data } })
+    session.summary.updatedAt = Date.now()
+    ctx.emit('session/event', { id: session.summary.sessionId }, { type, seq: session.cursor, time: Date.now(), data })
+  }
+
+  function setRunning(session, running) {
+    session.summary.running = running
+    ctx.emit('api-session/status', session.summary.sessionId, running)
+    if (!running) {
+      for (const resolve of [...session.waiters]) resolve()
+      session.waiters.clear()
+    }
+  }
+
+  const controller = {
+    async list(_request, _signal) {
+      return { items: [...sessions.values()].map(session => ({ ...session.summary })) }
+    },
+    follow(request, signal) {
+      const session = sessions.get(request.address.sessionId)
+      if (session === undefined) throw new Error(`unknown session ${request.address.sessionId}`)
+      const max = request.maxMessages ?? 200
+      async function* frames() {
+        let from = 0
+        yield {
+          type: 'snapshot',
+          header: { sessionId: session.summary.sessionId },
+          cursor: session.cursor,
+          records: session.records.slice(Math.max(0, session.records.length - max)),
+          hasMore: session.records.length > max,
+          projections: { values: { title: session.title } },
+        }
+        for (;;) {
+          if (signal.aborted) return
+          if (from < session.records.length) {
+            yield { type: 'event', event: session.records[from].event }
+            from += 1
+            continue
+          }
+          await new Promise((resolve) => {
+            const done = () => {
+              clearTimeout(timer)
+              session.waiters.delete(wake)
+              resolve()
+            }
+            const wake = () => done()
+            const timer = setTimeout(done, 50)
+            session.waiters.add(wake)
+            signal.addEventListener('abort', done, { once: true })
+          })
+        }
+      }
+      return frames()
+    },
+    async prompt(request) {
+      const session = sessions.get(request.sessionId)
+      if (session === undefined) throw new Error(`unknown session ${request.sessionId}`)
+      const text = (request.content ?? []).filter(part => part.type === 'text').map(part => part.text).join('')
+      append(session, 'turn/start', {})
+      append(session, 'user/message', { parts: [{ type: 'text', text }] })
+      setRunning(session, true)
+      const reply = `PONG: ${text}`
+      setTimeout(() => {
+        append(session, 'assistant/message', { parts: [{ type: 'text', text: reply }] })
+        setRunning(session, false)
+      }, 25)
+      return { accepted: true }
+    },
+    cancel({ sessionId }) {
+      const session = sessions.get(sessionId)
+      if (session === undefined) return { accepted: false }
+      setRunning(session, false)
+      return { accepted: true }
+    },
+    async rename({ sessionId, title }) {
+      const session = sessions.get(sessionId)
+      if (session !== undefined) session.title = title
+      return { renamed: true }
+    },
+    async selectModel() {
+      return { selected: true }
+    },
+    async create(request) {
+      const sessionId = request.sessionId ?? `session-test-${String(sessions.size + 1)}`
+      create({ sessionId, title: 'peer created', records: [] })
+      return { sessionId }
+    },
+    async modelCatalog() {
+      return { providers: [] }
+    },
+  }
+
+  return { controller, sessions, create, append, setRunning }
+}
+
+// ---------------------------------------------------------------------------
+// Run.
+// ---------------------------------------------------------------------------
+const stateDir = await mkdtemp(join(tmpdir(), 'lan-bridge-it-'))
+const ctx = createFakeCtx()
+const fake = createFakeSessions(ctx)
+ctx.provide('sessionController', fake.controller)
+
+// Archive lives in the Workspace registry, not the Session controller.
+const archived = new Set()
+ctx.provide('workspaceController', {
+  archiveSession(request) {
+    if (request.stopActivity !== true && fake.sessions.get(request.sessionId)?.summary?.running === true) {
+      throw new Error('workspace/session-active: stop the Session first')
+    }
+    archived.add(request.sessionId)
+    return Promise.resolve({ archivedSessionIds: [...archived] })
+  },
+  unarchiveSession(request) {
+    archived.delete(request.sessionId)
+    return Promise.resolve({ archivedSessionIds: [...archived] })
+  },
+})
+
+const cfg = resolveConfig({
+  role: 'both',
+  name: 'it-machine',
+  listen: { host: '127.0.0.1', port: 0 },
+  insecureHttp: true,
+  allowPeersToCreateSessions: false,
+  rateLimitPerMinute: 600,
+  audit: true,
+}, { DSH_HOME: stateDir })
+cfg.stateDir = stateDir
+
+const store = createStore({ stateDir, audit: cfg.audit, logger: ctx.logger })
+const api = createApi({ ctx, cfg, store, logger: ctx.logger })
+const server = createServer({ ctx, cfg, store, api, logger: ctx.logger })
+const remote = createRemote({ cfg, store, logger: ctx.logger })
+const peerCache = createPeerCache()
+
+const tools = new Map()
+ctx.provide('tools', {
+  register(definition) {
+    tools.set(definition.name, definition)
+    return () => tools.delete(definition.name)
+  },
+})
+installTools({ ctx, cfg, store, remote, server, logger: ctx.logger, peerCache })
+
+// The panel routes are registered through `connection.fetch`; capture them so
+// the settings form is exercised exactly as the browser would call it.
+const uiRoutes = new Map()
+ctx.provide('connection', {
+  fetch: {
+    register(route) {
+      uiRoutes.set(route.path, route)
+      return () => uiRoutes.delete(route.path)
+    },
+  },
+})
+const applySettings = createSettingsApplier({ cfg, store, server, logger: ctx.logger, ready: Promise.resolve() })
+installUi({ ctx, cfg, store, server, remote, peerCache, logger: ctx.logger, ready: Promise.resolve(), applySettings })
+
+async function uiCall(name, payload) {
+  const route = uiRoutes.get(`/api/lan-bridge.${name}`)
+  if (route === undefined) throw new Error(`no UI route ${name}`)
+  const request = new Request(`http://127.0.0.1${route.path}`, {
+    method: route.methods[0],
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+  })
+  const response = await route.fetch(request)
+  return response.json()
+}
+
+await server.start()
+const url = `http://127.0.0.1:${String(server.status.port)}`
+equal('listener bound', server.status.listening, true)
+
+function rawRequest(base, method, path, headers, body) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(path, base)
+    const request = requestFn({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method,
+      headers: { 'content-type': 'application/json', ...headers },
+    }, (response) => {
+      response.resume()
+      response.on('end', () => resolve(response.statusCode))
+    })
+    request.on('error', reject)
+    if (body !== undefined) request.write(body)
+    request.end()
+  })
+}
+
+async function rpc(method, params, { token, headers = {}, omitBridge = false } = {}) {
+  const init = {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(omitBridge ? {} : { 'x-dsh-bridge': '1' }),
+      ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+      ...headers,
+    },
+    body: JSON.stringify({ id: 'it', method, params }),
+  }
+  const response = await fetch(`${url}/rpc`, init)
+  const text = await response.text()
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    body = { parseError: text }
+  }
+  return { status: response.status, body }
+}
+
+// --- health & fence ------------------------------------------------------
+{
+  const response = await fetch(`${url}/healthz`)
+  equal('healthz status', response.status, 200)
+  const body = await response.json()
+  equal('healthz protocol', body.protocol, 1)
+  steps.push('')
+  steps.push('fence')
+  const rawStatus = (headers) => rawRequest(url, 'POST', '/rpc', headers, JSON.stringify({ id: 'it', method: 'bridge.hello', params: {} }))
+  equal('missing X-DSH-Bridge → 403', await rawStatus({ authorization: 'Bearer lzb_deadbeef' }), 403)
+  const withOrigin = await rpc('bridge.hello', {}, { token: 'lzb_deadbeef', headers: { origin: 'http://evil.test' } })
+  equal('Origin present → 403', withOrigin.status, 403)
+  const crossSite = await rpc('bridge.hello', {}, { token: 'lzb_deadbeef', headers: { 'sec-fetch-site': 'cross-site' } })
+  equal('sec-fetch-site → 403', crossSite.status, 403)
+  equal('foreign Host → 403', await rawStatus({ host: 'evil.test:5977', 'x-dsh-bridge': '1', authorization: 'Bearer lzb_deadbeef' }), 403)
+  const noToken = await rpc('bridge.hello', {}, {})
+  equal('missing bearer → 401', noToken.status, 401)
+  const badToken = await rpc('bridge.hello', {}, { token: 'lzb_00000000000000000000000000000000' })
+  equal('unknown bearer → 401', badToken.status, 401)
+  const unknownPath = await fetch(`${url}/nope`, { headers: { 'x-dsh-bridge': '1' } })
+  equal('unknown path → 404', unknownPath.status, 404)
+  const wrongMethod = await fetch(`${url}/rpc`, { method: 'GET', headers: { 'x-dsh-bridge': '1' } })
+  equal('GET /rpc → 405', wrongMethod.status, 405)
+}
+
+// --- pairing & hello -----------------------------------------------------
+const { token } = await store.pair({ name: 'it-peer', capabilities: ['read', 'prompt', 'control'] })
+const readOnly = await store.pair({ name: 'it-reader', capabilities: ['read'] })
+{
+  steps.push('')
+  steps.push('hello')
+  const hello = await rpc('bridge.hello', {}, { token })
+  equal('hello ok', hello.body.ok, true)
+  equal('hello protocol', hello.body.result.protocol, 1)
+  equal('hello app', hello.body.result.app, 'dsh-lan-bridge')
+  const unknown = await rpc('bridge.nope', {}, { token })
+  equal('unknown method → ok:false', unknown.body.ok, false)
+  equal('unknown method code', unknown.body.error.code, 'bridge/method-unavailable')
+  equal('unknown method stays HTTP 200', unknown.status, 200)
+  const badBody = await fetch(`${url}/rpc`, {
+    method: 'POST',
+    headers: { 'x-dsh-bridge': '1', authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: '{not json',
+  })
+  equal('malformed body → 400', badBody.status, 400)
+}
+
+// --- share gating --------------------------------------------------------
+const target = fake.create({
+  sessionId: 'session-it-target',
+  title: 'integration target',
+  records: [
+    { type: 'user/message', data: { parts: [{ type: 'text', text: 'hello from the log' }] } },
+    { type: 'assistant/message', data: { parts: [{ type: 'text', text: 'hello back' }] } },
+  ],
+})
+const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' })
+{
+  steps.push('')
+  steps.push('share gating')
+  const listed = await rpc('session.list', {}, { token })
+  equal('unshared sessions are invisible', listed.body.result.sessions.length, 0)
+  const blocked = await rpc('session.transcript', { sessionId: other.summary.sessionId }, { token })
+  equal('unshared transcript → session/not-shared', blocked.body.error.code, 'session/not-shared')
+  await store.setShared(target.summary.sessionId, true)
+  const sharedList = await rpc('session.list', {}, { token })
+  equal('shared session appears', sharedList.body.result.sessions.length, 1)
+  equal('listing carries the title', sharedList.body.result.sessions[0].title, 'integration target')
+  equal('listing reports running flag', sharedList.body.result.sessions[0].running, false)
+  const reader = await rpc('session.transcript', { sessionId: target.summary.sessionId }, { token: readOnly.token })
+  equal('read-only peer may read', reader.body.ok, true)
+  equal('transcript record count', reader.body.result.records.length, 2)
+  equal('transcript cursor', reader.body.result.cursor, 2)
+  const denied = await rpc('session.prompt', { sessionId: target.summary.sessionId, text: 'hi' }, { token: readOnly.token })
+  equal('read-only peer cannot prompt', denied.body.error.code, 'bridge/forbidden')
+  const state = await rpc('session.state', { sessionId: target.summary.sessionId }, { token })
+  equal('state running flag', state.body.result.running, false)
+  equal('state pendingInput empty', state.body.result.pendingInput, false)
+}
+
+// --- prompt → wait -------------------------------------------------------
+{
+  steps.push('')
+  steps.push('prompt & wait')
+  const before = (await rpc('session.transcript', { sessionId: target.summary.sessionId }, { token })).body.result.cursor
+  const prompt = await rpc('session.prompt', { sessionId: target.summary.sessionId, text: 'ping' }, { token })
+  equal('prompt accepted', prompt.body.ok, true)
+  const waiting = await rpc('session.wait', { sessionId: target.summary.sessionId, timeoutMs: 5000, afterSeq: before }, { token })
+  equal('wait ends idle', waiting.body.result.reason, 'idle')
+  const texts = JSON.stringify(waiting.body.result.records)
+  check('wait returns the assistant reply', texts.includes('PONG: ping'), texts.slice(0, 200))
+}
+
+// --- input-required ------------------------------------------------------
+{
+  steps.push('')
+  steps.push('input-required')
+  fake.append(target, 'approval/asked', { id: 'ap-1', toolName: 'shell' })
+  // The approval set is fed by the Host event bus; the api listens on it.
+  const waiting = await rpc('session.wait', { sessionId: target.summary.sessionId, timeoutMs: 5000 }, { token })
+  equal('pending approval → input-required', waiting.body.result.reason, 'input-required')
+  fake.append(target, 'approval/decided', { id: 'ap-1', outcome: 'denied' })
+  const state = await rpc('session.state', { sessionId: target.summary.sessionId }, { token })
+  equal('decided approval clears pendingInput', state.body.result.pendingInput, false)
+}
+
+// --- cancel --------------------------------------------------------------
+{
+  steps.push('')
+  steps.push('cancel')
+  fake.setRunning(target, true)
+  const cancelled = await rpc('session.cancel', { sessionId: target.summary.sessionId }, { token })
+  equal('cancel accepted', cancelled.body.result.accepted, true)
+  equal('cancel stops the turn', target.summary.running, false)
+}
+
+// --- create is refused by default ---------------------------------------
+{
+  steps.push('')
+  steps.push('create gating')
+  const withoutCapability = await rpc('session.create', { sessionId: 'session-it-new' }, { token })
+  equal('create without capability → bridge/forbidden', withoutCapability.body.error.code, 'bridge/forbidden')
+  const capable = await store.pair({ name: 'it-creator', capabilities: ['read', 'create'] })
+  const byConfig = await rpc('session.create', { sessionId: 'session-it-new' }, { token: capable.token })
+  equal('create refused by config → bridge/method-unavailable', byConfig.body.error.code, 'bridge/method-unavailable')
+  await store.revoke('it-creator')
+}
+
+// --- archive / unarchive ------------------------------------------------
+{
+  steps.push('')
+  steps.push('archive')
+  const noCapability = await rpc('session.archive', { sessionId: target.summary.sessionId }, { token })
+  equal('archive without capability → bridge/forbidden', noCapability.body.error.code, 'bridge/forbidden')
+  const archiver = await store.pair({ name: 'it-archiver', capabilities: ['read', 'archive'] })
+  const hidden = await rpc('session.archive', { sessionId: target.summary.sessionId }, { token: archiver.token })
+  equal('archive ok', hidden.body.ok, true)
+  equal('archive reports the new archive set', hidden.body.result.archived, true)
+  check('archive set contains the Session', hidden.body.result.archivedSessionIds.includes(target.summary.sessionId))
+  const restored = await rpc('session.unarchive', { sessionId: target.summary.sessionId }, { token: archiver.token })
+  equal('unarchive ok', restored.body.ok, true)
+  equal('archive set is empty again', restored.body.result.archivedSessionIds.length, 0)
+  const unsharedId = [...fake.sessions.keys()].find(id => id !== target.summary.sessionId)
+  const unshared = await rpc('session.archive', { sessionId: unsharedId }, { token: archiver.token })
+  equal('archive honours the share gate', unshared.body.error.code, 'session/not-shared')
+  // A running Session needs stopActivity, and the Host's refusal must surface.
+  fake.setRunning(fake.sessions.get(target.summary.sessionId), true)
+  const busy = await rpc('session.archive', { sessionId: target.summary.sessionId }, { token: archiver.token })
+  equal('archive of a running Session surfaces the Host error', busy.body.ok, false)
+  const forced = await rpc('session.archive', { sessionId: target.summary.sessionId, stopActivity: true }, { token: archiver.token })
+  equal('archive with stopActivity succeeds', forced.body.ok, true)
+  await rpc('session.unarchive', { sessionId: target.summary.sessionId }, { token: archiver.token })
+  fake.setRunning(fake.sessions.get(target.summary.sessionId), false)
+  await store.revoke('it-archiver')
+}
+
+// --- SSE ----------------------------------------------------------------
+{
+  steps.push('')
+  steps.push('sse')
+  const controller = new AbortController()
+  const response = await fetch(`${url}/events?session=${target.summary.sessionId}`, {
+    headers: { 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+    signal: controller.signal,
+  })
+  equal('events status', response.status, 200)
+  equal('events content-type', (response.headers.get('content-type') ?? '').includes('text/event-stream'), true)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (!buffer.includes('event: frame')) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    buffer += decoder.decode(chunk.value, { stream: true })
+  }
+  check('sse opens with a frame event', buffer.includes('event: frame'), buffer.slice(0, 200))
+  check('sse frame is a snapshot', buffer.includes('"type":"snapshot"'), buffer.slice(0, 300))
+  controller.abort()
+  await reader.cancel().catch(() => {})
+}
+
+// --- tools (controller side, pointed at our own listener) ---------------
+{
+  steps.push('')
+  steps.push('tools')
+  equal('eight tools registered', tools.size, 8)
+  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive']) {
+    check(`tool ${name} present`, tools.has(name))
+  }
+  const exec = async (name, args) => tools.get(name).execute(args, { signal: undefined })
+  // pair: this is how a machine mints a token for someone else, and the only
+  // path to a control/create-capable token (the panel only issues read+prompt).
+  const paired = await exec('lan_dsh_peers', { action: 'pair', name: 'ops', capabilities: ['read', 'control'] })
+  check('pair returns a one-time token', typeof paired.token === 'string' && paired.token.startsWith('lzb_'), String(paired.token))
+  equal('pair records the requested capabilities',
+    paired.inbound.find(item => item.name === 'ops').capabilities.join(','), 'read,control')
+  const opsState = await rpc('session.state', { sessionId: target.summary.sessionId }, { token: paired.token })
+  equal('paired token may read', opsState.body.ok, true)
+  const opsCancel = await rpc('session.cancel', { sessionId: target.summary.sessionId }, { token: paired.token })
+  equal('paired token with control may cancel', opsCancel.body.ok, true)
+  const limited = await exec('lan_dsh_peers', { action: 'pair', name: 'looker' })
+  equal('pair without capabilities defaults to read+prompt',
+    limited.inbound.find(item => item.name === 'looker').capabilities.join(','), 'read,prompt')
+
+  const added = await exec('lan_dsh_peers', { action: 'add', name: 'loopback', url, token })
+  equal('peer add ok', added.ok, true)
+  equal('peer add reachable', added.peers[0].reachable, true)
+  const listedPeers = await exec('lan_dsh_peers', { action: 'list' })
+  equal('peer list length', listedPeers.peers.length, 1)
+  const peerSessions = await exec('lan_dsh_sessions', { peer: 'loopback' })
+  equal('peer sessions visible', peerSessions.peers[0].sessions.length, 1)
+  const transcript = await exec('lan_dsh_transcript', { peer: 'loopback', sessionId: target.summary.sessionId, maxMessages: 5 })
+  equal('tool transcript ok', transcript.ok, true)
+  const before = (await rpc('session.transcript', { sessionId: target.summary.sessionId }, { token })).body.result.cursor
+  const prompted = await exec('lan_dsh_prompt', { peer: 'loopback', sessionId: target.summary.sessionId, text: 'from a tool', timeoutMs: 5000 })
+  equal('tool prompt ok', prompted.ok, true)
+  equal('tool prompt reason', prompted.reason, 'idle')
+  check('tool prompt returns the reply', JSON.stringify(prompted).includes('PONG: from a tool'), JSON.stringify(prompted).slice(0, 200))
+  const localShare = await exec('lan_dsh_share', { action: 'list' })
+  equal('share list shows both local sessions', localShare.sessions.length, 2)
+  equal('share list flags exactly one shared session', localShare.sessions.filter(item => item.shared === true).length, 1)
+  const unshared = await exec('lan_dsh_share', { action: 'unshare', sessionId: target.summary.sessionId })
+  equal('unshare ok', unshared.ok, true)
+  const afterUnshare = await exec('lan_dsh_sessions', { peer: 'loopback' })
+  equal('peer sees nothing after unshare', afterUnshare.peers[0].sessions.length, 0)
+  // archive through a peer needs an archive-capable token, and the tool also
+  // works on this machine when `peer` is omitted.
+  await exec('lan_dsh_share', { action: 'share', sessionId: target.summary.sessionId })
+  const archivePeer = await exec('lan_dsh_peers', { action: 'pair', name: 'it-archiver', capabilities: ['read', 'archive'] })
+  await exec('lan_dsh_peers', { action: 'add', name: 'arch-peer', url, token: archivePeer.token })
+  const toolArchived = await exec('lan_dsh_archive', { action: 'archive', peer: 'arch-peer', sessionId: target.summary.sessionId })
+  equal('tool archive on a peer ok', toolArchived.ok, true)
+  equal('tool archive reports archived', toolArchived.archived, true)
+  const toolRestored = await exec('lan_dsh_archive', { action: 'unarchive', peer: 'arch-peer', sessionId: target.summary.sessionId })
+  equal('tool unarchive on a peer ok', toolRestored.archived, false)
+  const localArchived = await exec('lan_dsh_archive', { action: 'archive', sessionId: target.summary.sessionId })
+  equal('tool archive on this machine ok', localArchived.ok, true)
+  const localRestored = await exec('lan_dsh_archive', { action: 'unarchive', sessionId: target.summary.sessionId })
+  equal('tool unarchive on this machine ok', localRestored.archived, false)
+  await exec('lan_dsh_peers', { action: 'remove', name: 'arch-peer' })
+
+  const removed = await exec('lan_dsh_peers', { action: 'remove', name: 'loopback' })
+  equal('peer remove ok', removed.ok, true)
+  equal('peer list empty after remove', (await exec('lan_dsh_peers', { action: 'list' })).peers.length, 0)
+  void before
+}
+
+// --- listening settings (the panel form) ---------------------------------
+{
+  steps.push('')
+  steps.push('settings')
+  const initial = await uiCall('state')
+  equal('state exposes settings.host', initial.settings.host, '127.0.0.1')
+  equal('state exposes the create-session switch', initial.settings.allowPeersToCreateSessions, false)
+  check('state lists local addresses', Array.isArray(initial.addresses) && initial.addresses.includes('127.0.0.1'), JSON.stringify(initial.addresses))
+  equal('state has no restart pending', initial.restartRequired, false)
+
+  const badHost = await uiCall('settings', { host: 'example.local' })
+  equal('non-literal host refused', badHost.ok, false)
+  equal('non-literal host error code', badHost.error.code, 'bridge/bad-request')
+
+  const plainLan = await uiCall('settings', { host: '0.0.0.0', port: 0, insecureHttp: false })
+  equal('lan bind without acknowledgement refused', plainLan.ok, false)
+  equal('lan refusal code', plainLan.error.code, 'bridge/forbidden')
+
+  const halfTls = await uiCall('settings', { tls: { certFile: '/tmp/a.pem' } })
+  equal('half TLS pair refused', halfTls.ok, false)
+
+  const widened = await uiCall('settings', { host: '0.0.0.0', port: 0, insecureHttp: true })
+  equal('lan bind accepted after acknowledgement', widened.ok, true)
+  equal('lan bind reports the bound host', widened.state.settings.host, '0.0.0.0')
+  check('lan bind has a live port', widened.state.listen.port > 0, String(widened.state.listen.port))
+  const lanPort = widened.state.listen.port
+  const lanUrl = `http://127.0.0.1:${String(lanPort)}`
+  equal('rebound listener answers healthz', await rawRequest(lanUrl, 'GET', '/healthz'), 200)
+  const iface = localAddresses().find((address) => address !== '127.0.0.1')
+  if (iface === undefined) {
+    console.log('  note no non-loopback interface present; interface-authority check skipped')
+  } else {
+    const lanHostHeader = await rawRequest(lanUrl, 'GET', '/healthz', { host: `${iface}:${String(lanPort)}` })
+    equal('interface address is an accepted authority', lanHostHeader, 200)
+  }
+
+  const back = await uiCall('settings', { host: '127.0.0.1', port: 0 })
+  equal('loopback restore accepted', back.ok, true)
+  equal('restore reports loopback', back.state.settings.host, '127.0.0.1')
+
+  const persisted = await store.settings()
+  equal('settings persisted to bridge.json', persisted.host, '127.0.0.1')
+  equal('persisted port is what the operator asked for', persisted.port, 0)
+
+  const port = server.status.port
+  const broken = await uiCall('settings', { port: 1 })
+  equal('unbindable port refused', broken.ok, false)
+  equal('unbindable port error code', broken.error.code, 'bridge/internal')
+  equal('listener survived the failed rebind', server.status.listening, true)
+  equal('listener kept its port', server.status.port, port)
+
+  const created = await uiCall('settings', { allowPeersToCreateSessions: true })
+  equal('create-session switch saved', created.ok, true)
+  equal('create-session switch applied live', cfg.allowPeersToCreateSessions, true)
+  const hello = await uiCall('state')
+  void hello
+
+  // Boot overlay: a saved file wins over the row config, and an illegal saved
+  // value is ignored instead of taking the listener down.
+  await store.updateSettings({ host: '127.0.0.2', port: 0, insecureHttp: true, trustedHosts: ['it-host'] })
+  const bootCfg = resolveConfig({ role: 'both', listen: { host: '127.0.0.1', port: 5977 } }, { DSH_HOME: stateDir })
+  const boot = await loadPersistedSettings({ cfg: bootCfg, store, logger: ctx.logger })
+  equal('boot overlay applied saved host', bootCfg.hostname, '127.0.0.2')
+  equal('boot overlay applied saved trustedHosts', JSON.stringify(bootCfg.trustedHosts), JSON.stringify(['it-host']))
+  check('boot overlay reports what it applied', boot.applied.includes('host'), JSON.stringify(boot.applied))
+  await store.updateSettings({ host: '0.0.0.0', insecureHttp: false })
+  const illegalCfg = resolveConfig({ role: 'both', listen: { host: '127.0.0.1', port: 5977 } }, { DSH_HOME: stateDir })
+  const illegal = await loadPersistedSettings({ cfg: illegalCfg, store, logger: ctx.logger })
+  equal('illegal saved settings fall back to the row config', illegalCfg.hostname, '127.0.0.1')
+  check('illegal saved settings report why', typeof illegal.ignored === 'string' && illegal.ignored.length > 0, illegal.ignored)
+  await store.updateSettings({ host: '127.0.0.1', port: 0, insecureHttp: cfg.insecureHttp, trustedHosts: [] })
+
+  const archivePaired = await uiCall('pair', { name: 'it-ui-archiver', capabilities: ['read', 'archive'] })
+  equal('panel can issue an archive token', archivePaired.ok, true)
+  check('archive token carries archive', archivePaired.capabilities.includes('archive'), JSON.stringify(archivePaired.capabilities))
+  await uiCall('revoke', { name: 'it-ui-archiver' })
+}
+
+// --- audit ---------------------------------------------------------------
+{
+  steps.push('')
+  steps.push('audit')
+  const text = await readFile(join(stateDir, 'audit.jsonl'), 'utf8')
+  const lines = text.trim().split('\n').filter(line => line !== '').map(line => JSON.parse(line))
+  check('audit recorded calls', lines.length > 5, `${String(lines.length)} lines`)
+  check('audit names the peer', lines.some(line => line.peer === 'it-peer'))
+  check('audit records the method', lines.some(line => line.method === 'session.prompt'))
+  check('audit records failures', lines.some(line => line.ok === false))
+}
+
+await ctx.dispose()
+await server.stop()
+await rm(stateDir, { recursive: true, force: true })
+
+console.log(steps.join('\n'))
+console.log('')
+console.log(`${String(passes)} passed, ${String(failures)} failed`)
+process.exit(failures === 0 ? 0 : 1)
