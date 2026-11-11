@@ -92,6 +92,11 @@ window.__ModuleLoader__.load({
         cancel: '取消',
         settingsTitle: '监听设置',
         settingsHint: '改这里就等于改监听配置：保存后立即重建监听器，不需要改 cordis.patch.yml，也不需要重启 Host。',
+        settingsName: '本机名称',
+        settingsNameHint: '对端列表和 hello 握手里显示的名字。改名立即生效，不会重建监听器。',
+        settingsNameMissing: '本机名称不能为空',
+        settingsNameTooLong: '本机名称最多 64 个字符',
+        settingsNameLive: '改名不需要中断连接，已配对的 peer 下次握手就能看到新名字。',
         settingsHost: '监听地址',
         settingsHostHint: '127.0.0.1 只接受本机连接；0.0.0.0 表示所有网卡。',
         settingsPort: '端口',
@@ -187,6 +192,11 @@ window.__ModuleLoader__.load({
         cancel: 'Cancel',
         settingsTitle: 'Listener',
         settingsHint: 'This is the listener itself: saving rebuilds it immediately, with no edit to cordis.patch.yml and no Host restart.',
+        settingsName: 'Machine name',
+        settingsNameHint: 'The name peers see in their lists and in the hello handshake. Renaming applies at once without rebuilding the listener.',
+        settingsNameMissing: 'The machine name cannot be empty',
+        settingsNameTooLong: 'The machine name is limited to 64 characters',
+        settingsNameLive: 'Renaming does not drop connections: a paired peer sees the new name on its next handshake.',
         settingsHost: 'Bind address',
         settingsHostHint: '127.0.0.1 accepts this machine only; 0.0.0.0 means every interface.',
         settingsPort: 'Port',
@@ -365,6 +375,7 @@ window.__ModuleLoader__.load({
         ? settings.port
         : (typeof listen.port === 'number' && Number.isFinite(listen.port) ? listen.port : null)
       return {
+        name: text(settings.name, text(record(root).name, '')),
         host: text(settings.host, text(listen.host, '')),
         port,
         insecureHttp: settings.insecureHttp === true,
@@ -567,6 +578,7 @@ window.__ModuleLoader__.load({
     function draftFromSettings(settings) {
       const tls = settings.tls
       return {
+        name: settings.name,
         host: settings.host,
         port: settings.port === null ? '' : String(settings.port),
         insecureHttp: settings.insecureHttp,
@@ -579,7 +591,8 @@ window.__ModuleLoader__.load({
 
     /** Two drafts are equal when every edited field matches exactly. */
     function sameDraft(left, right) {
-      return left.host === right.host
+      return left.name === right.name
+        && left.host === right.host
         && left.port === right.port
         && left.insecureHttp === right.insecureHttp
         && left.allowPeersToCreateSessions === right.allowPeersToCreateSessions
@@ -592,6 +605,7 @@ window.__ModuleLoader__.load({
     function settingsKeyOf(settings) {
       const tls = settings.tls
       return [
+        settings.name,
         settings.host,
         settings.port === null ? '' : settings.port,
         settings.insecureHttp ? '1' : '0',
@@ -852,6 +866,7 @@ window.__ModuleLoader__.load({
         setDraft((previous) => ({ ...previous, [field]: value }))
       }
 
+      const name = draft.name.trim()
       const host = draft.host.trim()
       const portText = draft.port.trim()
       const portNumber = /^\d+$/.test(portText) ? Number(portText) : NaN
@@ -866,18 +881,24 @@ window.__ModuleLoader__.load({
       // acknowledgment. Say so pre-emptively, but leave the button live: a
       // refusal costs nothing and the Host's own sentence teaches the rule.
       const insecureWarn = outward && !tlsPresent && !draft.insecureHttp
-      const problem = hostMissing
-        ? 'settingsHostMissing'
-        : (!portValid ? 'settingsPortInvalid' : (tlsHalf ? 'settingsTlsHalf' : ''))
+      const nameMissing = name === ''
+      const nameTooLong = name.length > 64
+      const problem = nameMissing
+        ? 'settingsNameMissing'
+        : (nameTooLong ? 'settingsNameTooLong' : (hostMissing
+          ? 'settingsHostMissing'
+          : (!portValid ? 'settingsPortInvalid' : (tlsHalf ? 'settingsTlsHalf' : ''))))
       const dirty = !sameDraft(draft, baseline)
       // Only a different address or port rebuilds the listener; toggling a
       // permission or the Host allowlist does not.
       const listenChanged = host !== baseline.host.trim() || portText !== baseline.port.trim()
+      const nameLiveChanged = name !== baseline.name.trim() && name !== ''
       const canSave = dirty && problem === '' && !saving
 
       const save = () => {
         if (saving || problem !== '' || !dirty) return
         const payload = {
+          name,
           host,
           port: portNumber,
           insecureHttp: draft.insecureHttp,
@@ -926,6 +947,23 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dslb-group' },
         h('div', { className: 'dslb-groupTitle' }, t('settingsTitle')),
         h('div', { className: 'dslb-hint' }, t('settingsHint')),
+
+        h('div', { className: 'dslb-formGrid' },
+          h('label', { className: 'dslb-formField' },
+            h('span', { className: 'dslb-formLabel' }, t('settingsName')),
+            h('input', {
+              className: 'dslb-input',
+              value: draft.name,
+              maxLength: 64,
+              spellCheck: false,
+              disabled: saving,
+              'aria-label': t('settingsName'),
+              onChange: (event) => update('name', event.currentTarget.value),
+            }),
+            h('span', { className: 'dslb-formHint' }, t('settingsNameHint')),
+            nameLiveChanged
+              ? h('span', { className: 'dslb-formHint' }, t('settingsNameLive'))
+              : null)),
 
         h('div', { className: 'dslb-formGrid' },
           h('div', { className: 'dslb-formField' },

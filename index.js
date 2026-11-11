@@ -9,7 +9,7 @@
  *
  * The wire contract lives in PROTOCOL.md next to this file.
  */
-import { VERSION, assignSettings, resolveConfig, validateSettingsPatch } from './lib/config.js'
+import { VERSION, resolveConfig } from './lib/config.js'
 import { createStore } from './lib/store.js'
 import { createApi } from './lib/api.js'
 import { createServer } from './lib/server.js'
@@ -71,7 +71,7 @@ export function apply(ctx, config) {
 
   // One line the operator can find in the Host log: the bridge's whole posture.
   logger?.info?.(
-    `lan-bridge v${VERSION}: role=${cfg.role} state=${cfg.stateDir} `
+    `lan-bridge v${VERSION}: role=${cfg.role} name=${cfg.name} state=${cfg.stateDir} `
     + `listen=${cfg.listening ? `${cfg.hostname}:${String(cfg.port)}` : 'off'} `
     + `tools=${cfg.controlling ? 'on' : 'off'} create=${cfg.allowPeersToCreateSessions ? 'allowed' : 'refused'}`,
   )

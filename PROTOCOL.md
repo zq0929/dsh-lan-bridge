@@ -170,7 +170,7 @@ them. Prefix `/api/lan-bridge`.
   "outbound": [ { "name": "peer-b", "url": "http://192.168.1.8:5977", "reachable": true,
                   "addedAt": 1762…, "error": null } ],
   "sessions": [ { "sessionId": "…", "title": "…", "running": false, "cwd": "…", "shared": true } ],
-  "settings": { "host": "127.0.0.1", "port": 5977, "insecureHttp": false,
+  "settings": { "name": "my-mac", "host": "127.0.0.1", "port": 5977, "insecureHttp": false,
                 "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
                 "tls": null },
   "addresses": ["127.0.0.1", "192.168.1.8"],
@@ -178,7 +178,8 @@ them. Prefix `/api/lan-bridge`.
 }
 ```
 
-`settings` is the editable listening posture as currently applied; `listen` is what the
+`settings` is the editable posture as currently applied (`name` is the identity this machine
+advertises in `bridge.hello` and in peers' lists); `listen` is what the
 socket is actually doing (when the operator saves `port: 0`, `settings.port` stays `0`
 and `listen.port` carries the port the OS assigned). `addresses` lists this machine's
 interface literals so the panel can offer them. `restartRequired` is reserved: every
@@ -197,7 +198,7 @@ setting in `settings` currently applies without a Host restart.
 Body (every field optional; the panel sends the whole set):
 
 ```json
-{ "host": "0.0.0.0", "port": 5977, "insecureHttp": true,
+{ "name": "my-mac", "host": "0.0.0.0", "port": 5977, "insecureHttp": true,
   "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
   "tls": null }
 ```
@@ -218,6 +219,10 @@ Refusal:
 
 Rules:
 
+- `name` is 1–64 characters after trimming, with no control characters. It is the name peers
+  see: `bridge.hello` returns it immediately and `lan_dsh_peers list` shows it on the other
+  machine after its next handshake. Renaming never rebinds the socket and never drops a
+  connected peer.
 - `host` must be an IP literal (`127.0.0.1`, `0.0.0.0`, `192.168.1.8`, …) or `localhost`.
   `0.0.0.0` means every interface.
 - Binding any non-loopback address without TLS requires `insecureHttp: true`. Without it
@@ -228,8 +233,8 @@ Rules:
   the rebind (sub-second). If the new bind fails, the previous settings are restored, the
   old socket comes back on the same port, and the call returns `bridge/internal` with a
   `restored` flag in `details` — a bad value can never leave the machine unreachable.
-- Everything else (`allowPeersToCreateSessions`, `trustedHosts`, and `insecureHttp` while the
-  host stays loopback) applies without touching the socket.
+- Everything else (`name`, `allowPeersToCreateSessions`, `trustedHosts`, and `insecureHttp` while
+  the host stays loopback) applies without touching the socket.
 - Accepted values are persisted in `$DSH_HOME/lan-bridge/bridge.json` under `settings` and
   win over the bundle row's `config:` on the next start. An illegal saved value is ignored
   at boot (the row's posture is used) instead of preventing the listener from starting.

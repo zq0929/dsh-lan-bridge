@@ -630,6 +630,34 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('listener survived the failed rebind', server.status.listening, true)
   equal('listener kept its port', server.status.port, port)
 
+  // --- machine name: editable, live, and it does not touch the socket ------
+  equal('state exposes the machine name', initial.settings.name, 'it-machine')
+  const emptyName = await uiCall('settings', { name: '   ' })
+  equal('empty machine name refused', emptyName.ok, false)
+  equal('empty machine name error code', emptyName.error.code, 'bridge/bad-request')
+  const longName = await uiCall('settings', { name: 'n'.repeat(65) })
+  equal('over-long machine name refused', longName.ok, false)
+  const badName = await uiCall('settings', { name: 'bad\u0007name' })
+  equal('control characters in the name refused', badName.ok, false)
+  const portBeforeRename = server.status.port
+  const renamed = await uiCall('settings', { name: '  renamed-it  ' })
+  equal('rename accepted', renamed.ok, true)
+  equal('rename is trimmed and applied', renamed.state.settings.name, 'renamed-it')
+  equal('rename reached the live config', cfg.name, 'renamed-it')
+  equal('rename did not rebuild the listener', server.status.port, portBeforeRename)
+  // The module-level `url` still points at the pre-rebind port, so ask the
+  // listener that is actually up right now.
+  const liveUrl = `http://127.0.0.1:${String(server.status.port)}`
+  const renamedHello = await fetch(`${liveUrl}/rpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ id: 'it', method: 'bridge.hello', params: {} }),
+  }).then((response) => response.json())
+  equal('hello advertises the new name', renamedHello.result.name, 'renamed-it')
+  equal('renamed value persisted', (await store.settings()).name, 'renamed-it')
+  const nameOnlyChange = await uiCall('settings', { trustedHosts: ['peer.local:5977'] })
+  equal('a patch without a name keeps the current one', nameOnlyChange.state.settings.name, 'renamed-it')
+
   const created = await uiCall('settings', { allowPeersToCreateSessions: true })
   equal('create-session switch saved', created.ok, true)
   equal('create-session switch applied live', cfg.allowPeersToCreateSessions, true)
