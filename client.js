@@ -109,6 +109,8 @@ window.__ModuleLoader__.load({
         settingsPortAuto: '系统当前分配的端口：{port}',
         settingsAllowCreate: '允许对端新建会话',
         settingsAllowCreateHint: '对等端可以在本机新建会话，保存后立即生效。',
+        settingsDiscovery: '局域网发现（mDNS）',
+        settingsDiscoveryHint: '在本机广播名字、地址和端口，方便别人直接找到你；令牌不会广播，配对仍需手动。',
         settingsTrustedHosts: '信任主机',
         settingsTrustedHostsHint: '对端用主机名访问时，Host 头要命中白名单。多个用逗号或空格分隔。',
         settingsTrustedHostsPlaceholder: 'mac.local:5977 nas.lan:5977',
@@ -214,6 +216,8 @@ window.__ModuleLoader__.load({
         settingsPortAuto: 'Port assigned right now: {port}',
         settingsAllowCreate: 'Let peers create Sessions',
         settingsAllowCreateHint: 'A peer can create a Session on this machine; takes effect on save.',
+        settingsDiscovery: 'LAN discovery (mDNS)',
+        settingsDiscoveryHint: 'Announce this machine’s name, address and port so peers can find it; tokens are never broadcast, so pairing stays manual.',
         settingsTrustedHosts: 'Trusted hosts',
         settingsTrustedHostsHint: 'When a peer connects by host name, its Host header must match an entry. Separate with commas or spaces.',
         settingsTrustedHostsPlaceholder: 'mac.local:5977 nas.lan:5977',
@@ -392,6 +396,7 @@ window.__ModuleLoader__.load({
         allowPeersToCreateSessions: settings.allowPeersToCreateSessions !== false,
         trustedHosts: list(settings.trustedHosts).map((value) => text(value, '')).filter((value) => value !== ''),
         tls: tls === null ? null : { certFile: text(tls.certFile, ''), keyFile: text(tls.keyFile, '') },
+        discovery: settings.discovery === true,
       }
     }
 
@@ -607,6 +612,7 @@ window.__ModuleLoader__.load({
         trustedHosts: settings.trustedHosts.join(', '),
         certFile: tls === null ? '' : tls.certFile,
         keyFile: tls === null ? '' : tls.keyFile,
+        discovery: settings.discovery === true,
       }
     }
 
@@ -620,6 +626,7 @@ window.__ModuleLoader__.load({
         && left.trustedHosts === right.trustedHosts
         && left.certFile === right.certFile
         && left.keyFile === right.keyFile
+        && left.discovery === right.discovery
     }
 
     /** A stable key for one settings block, so a poll does not churn the form. */
@@ -634,6 +641,7 @@ window.__ModuleLoader__.load({
         settings.trustedHosts.join(','),
         tls === null ? '' : tls.certFile,
         tls === null ? '' : tls.keyFile,
+        settings.discovery === true ? '1' : '0',
       ].join('\u0000')
     }
 
@@ -857,6 +865,15 @@ window.__ModuleLoader__.load({
       const [failure, setFailure] = React.useState(null)
       const [saved, setSaved] = React.useState(false)
 
+      // Peers this machine heard over mDNS, for the hint chips under the switch.
+      const found = record(record(data.discovery)).found
+      const discovered = Array.isArray(found)
+        ? found.map((entry) => ({
+          name: text(record(entry).name, '?'),
+          url: text(record(entry).url, ''),
+        })).filter((entry) => entry.url !== '')
+        : []
+
       const draftRef = React.useRef(draft)
       draftRef.current = draft
       const baselineRef = React.useRef(baseline)
@@ -923,6 +940,7 @@ window.__ModuleLoader__.load({
           host,
           port: portNumber,
           insecureHttp: draft.insecureHttp,
+          discovery: draft.discovery,
           allowPeersToCreateSessions: draft.allowPeersToCreateSessions,
           trustedHosts: parseTrustedHosts(draft.trustedHosts),
           tls: tlsPresent ? { certFile, keyFile } : null,
@@ -1036,6 +1054,24 @@ window.__ModuleLoader__.load({
             disabled: saving,
             onChange: () => update('allowPeersToCreateSessions', !draft.allowPeersToCreateSessions),
           })),
+
+        h('div', { className: 'dslb-row', 'data-quiet': '1' },
+          h('div', { className: 'dslb-main' },
+            h('div', { className: 'dslb-title' }, t('settingsDiscovery')),
+            h('div', { className: 'dslb-desc' }, t('settingsDiscoveryHint'))),
+          h(Switch, {
+            checked: draft.discovery,
+            label: t('settingsDiscovery'),
+            disabled: saving,
+            onChange: () => update('discovery', !draft.discovery),
+          })),
+
+        discovered.length > 0
+          ? h('div', { className: 'dslb-chips' }, discovered.map((entry) => h('span', {
+            key: `${entry.name}:${entry.url}`,
+            className: 'dslb-chip',
+          }, `${entry.name} · ${entry.url}`)))
+          : null,
 
         h('div', { className: 'dslb-formGrid' },
           h('label', { className: 'dslb-formField' },

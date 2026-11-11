@@ -36,7 +36,7 @@
 # 2) 在 DSH 里用插件管理器安装这个目录（绝对路径）
 #    plugin_manager action=install_bundle target=/绝对路径/dsh-lan-bridge
 # 3) 重启 DSH（桌面版退出重开），插件按 cordis.patch.yml 的默认配置挂载：
-#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 11 个工具 + 面板
+#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 11 个工具 + 面板 + 可选 mDNS
 ```
 
 装完在 Web UI 里应该能看到「局域网桥」面板（会话共享开关 / peer 列表 / 配对）。
@@ -137,7 +137,7 @@
 | `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复；可带 `intent` 说明意图 |
 | `lan_dsh_board` | 读共享板：两台机器的任务 + 目标文档（`machine/id` 命名空间，只读合并） |
 | `lan_dsh_task` | 在共享板上建任务 / 按 revision CAS 改任务（认领、完成、改依赖、改派）/ `action=transfer` 把任务归属交给另一台机器 |
-| `lan_dsh_goal` | 读 / CAS 写 / 清空共享目标文档（"什么叫做完"写在这里） |
+| `lan_dsh_goal` | 读 / CAS 写 / 清空 / **双向收敛**共享目标文档（"什么叫做完"写在这里） |
 | `lan_dsh_wait` | 继续等一个还在跑的回合 |
 | `lan_dsh_cancel` | 打断 peer 当前回合 |
 
@@ -172,6 +172,8 @@ lan_dsh_task action=transfer peer=windows taskId=t-abc to=lead-mac      # 让 wi
 板子会脏，脏了就得能清。`taskAction=delete` 是真删，但留一块墓碑（id / 主题 / 谁删的 / 何时），所以事后还能回答"这条是删了还是从没建过"。有别的任务被它阻塞时删除会被拒（`board/conflict`，附 `dependents`）；真要删就重复一次带 `force=true`，那时**依赖它的任务会自动去掉这个阻塞项**（revision +1，并在 `relinked` 里列出），所以不会有任务永远等一个鬼。墓碑会出现在 `lan_dsh_board` 的读结果里（最近 10 条），已完成的任务也可以删：这不是抹掉历史，这是让板子保持可读。目标文档同理：`lan_dsh_goal action=clear` 清空但**仍然递增 revision**，下一个写的人必须带上真正读到的版本号，所以"清空"不会被当成"重置到 0"。
 
 转移是**搬**不是**标**：先让接收方 `tasks.adopt` 收下，成功之后才删本地那条。接收方不可达、revision 过期、或任务已完成，都会在本地原样保留 —— 不会出现"两边都没有"的空档。接收方拿到后是新的 owner，可以继续 `claim` / `complete`；记录里留 `origin.machine` 说明它从哪儿来。
+
+**目标文档会自己对齐。** 两台机器各存一份 goal，靠 revision 排序：读板的时候顺手收敛——对方版本更高就拉下来，我方更高就推过去，输出里会写一行 `goal converged with windows (rev 3) → now rev 4 [pulled]`。所以要手动 `lan_dsh_goal action=sync` 才对齐的时代过去了：只要有人看一眼板子，落后的那份就被纠正。唯一不自动处理的是**同版本不同文本**（两台机器离线各写了一次）：那时报 `goal DIVERGED with …`，让人来写第三次，而不是让桥去猜谁对。没有向量时钟是故意的——宁可暴露一次分叉，也不假装合并。
 
 它按"谁创建谁拥有"复制，而不是搞一个中心库：
 
@@ -220,6 +222,20 @@ lan_dsh_task action=transfer peer=windows taskId=t-abc to=lead-mac      # 让 wi
 
 对端收到的是 `[lan-bridge intent] … [/lan-bridge intent]` 块加正文。信封是**建议性的**：对端忽略它也能看到一条普通提示词；格式不合法（缺 `goal`、`plan` 不是数组、字段超长）会被 `bridge/bad-request` 拒掉。收到的信封会按会话保存在接收方（最新 20 条），可用 RPC `session.intents` 读回，方便复盘"当时为什么要发这句"。
 这是有意的：让远端代替你点“允许”比不实现更危险。
+
+### 局域网发现：不用再问"你的 IP 是多少"
+
+面板里打开 **局域网发现（mDNS）**（或 `config.discovery.enabled: true`），本机就会在局域网里广播自己：名字、监听端口、版本，以及一条 A 记录。对端一句 `lan_dsh_peers action=discover` 就能看到候选：
+
+```
+discovered over mDNS:
+  windows  http://172.17.45.8:5977  v0.3.5
+  my-pc    http://192.168.1.9:5977  v0.3.5  (already added)
+```
+
+**广播里没有令牌，也授不了权。** mDNS 只回答"它在哪"，"谁能驱动它"仍然由对端面板签发的 bearer token 决定，会话仍要靠 `share` 逐个点开。这是刻意的分层：网络可以知道你的地址，但只有你能决定谁可以动手。发现只是省了问 IP 这一步，配对还是要人工做一次。
+
+端口广播的是**实际绑定端口**（配置写 `port: 0` 时也不会广播 0）；多网卡只广播第一个非回环 IPv4。
 
 ## 已知限制
 

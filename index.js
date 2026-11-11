@@ -17,6 +17,7 @@ import { createPeerCache, createRemote } from './lib/remote.js'
 import { installTools } from './lib/tools.js'
 import { installUi } from './lib/ui.js'
 import { createSettingsApplier, loadPersistedSettings } from './lib/settings.js'
+import { createDiscovery } from './lib/mdns.js'
 
 /** Loader entry identity, matching the row id in `cordis.patch.yml`. */
 export const name = 'lan-bridge'
@@ -63,18 +64,37 @@ export function apply(ctx, config) {
     }, 'lan-bridge: listener')
   }
 
+  // mDNS is how a peer finds this machine without anyone typing an address.
+  // It carries the name, port and version only — never a token, so discovery
+  // narrows "where" and pairing still decides "who may".
+  const discovery = cfg.discovery.enabled
+    ? createDiscovery({ cfg, logger, portOf: () => server.status.port ?? cfg.port })
+    : undefined
+  if (discovery !== undefined) {
+    ctx.effect(() => {
+      let stopped = false
+      void discovery.start()
+      return () => {
+        if (stopped) return
+        stopped = true
+        discovery.stop()
+      }
+    }, 'lan-bridge: mdns')
+  }
+
   const applySettings = createSettingsApplier({ cfg, store, server, logger, ready })
 
   if (cfg.controlling) {
-    installTools({ ctx, cfg, store, remote, server, logger, peerCache })
+    installTools({ ctx, cfg, store, remote, server, logger, peerCache, discovery })
   }
 
-  installUi({ ctx, cfg, store, server, remote, peerCache, logger, ready, applySettings })
+  installUi({ ctx, cfg, store, server, remote, peerCache, logger, ready, applySettings, discovery })
 
   // One line the operator can find in the Host log: the bridge's whole posture.
   logger?.info?.(
     `lan-bridge v${VERSION}: role=${cfg.role} name=${cfg.name} state=${cfg.stateDir} `
     + `listen=${cfg.listening ? `${cfg.hostname}:${String(cfg.port)}` : 'off'} `
-    + `tools=${cfg.controlling ? 'on' : 'off'} create=${cfg.allowPeersToCreateSessions ? 'allowed' : 'refused'}`,
+    + `tools=${cfg.controlling ? 'on' : 'off'} create=${cfg.allowPeersToCreateSessions ? 'allowed' : 'refused'} `
+    + `discovery=${cfg.discovery.enabled ? 'on' : 'off'}`,
   )
 }

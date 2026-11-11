@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.4", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.5", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -59,7 +59,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
     "session.intents": true,
     "tasks.list": true, "tasks.create": true, "tasks.update": true,
     "tasks.transfer": true, "tasks.adopt": true,
-    "goal.get": true, "goal.set": true, "goal.clear": true,
+    "goal.get": true, "goal.set": true, "goal.clear": true, "goal.adopt": true,
     "approval.answer": false
   },
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
@@ -153,6 +153,7 @@ qualified as `machine/id` for that merged view.
 | `goal.get` | `{}` | `{ "name": …, "goal": { revision, title, text, updatedBy, updatedAt } }` |
 | `goal.set` | `{ expectedRevision, text, title? }` | `{ "name": …, "goal": { … } }` |
 | `goal.clear` | `{ expectedRevision }` | `{ "name": …, "goal": { … , "cleared": true } }` |
+| `goal.adopt` | `{ goal, from }` | `{ "name": …, "applied": bool, "diverged": bool, "goal": { … }, "reason"? }` |
 
 Task view fields: `id`, `revision`, `subject`, `description`, `status`
 (`pending` | `in_progress` | `completed`), `blockedBy`, `writeScopes`,
@@ -192,6 +193,22 @@ blockers that point at tasks the receiving board does not know are dropped
 cannot be handed over (`bridge/forbidden`), because completed tasks stay as
 history. Both machines must know each other: the receiver needs the sender as a
 configured outbound peer, and each side presents a token the other accepts.
+
+Converging the goal: each machine keeps its own copy, so "agreed" has to mean
+something mechanical. Revisions order the copies: `goal.adopt` takes a peer's
+document only when its revision is strictly higher (`applied: true`,
+`appliedFrom` records who handed it over), ignores a lower one, and — for the
+case that actually needs a human — reports an **equal** revision with different
+text as `diverged: true` instead of picking a winner. A reader that merges the
+board (`lan_dsh_board`) also converges: it pulls the higher revision, or pushes
+its own to peers that are behind, and prints `goal converged with X (rev N)`, so
+a stale copy is corrected the next time anybody looks. `lan_dsh_goal
+action=sync` runs the same exchange on demand for one peer or all of them.
+
+There is deliberately no vector clock: revisions are monotonic per writer and a
+lost race shows up as divergence, which is the honest signal. A machine that
+was offline does not invent a merge — it either adopts a newer document or asks
+its operator to write again.
 
 Limits: 200 tasks, 50 tombstones, 20 blockers, 40 write scopes, 20 KB goal text.
 
@@ -267,7 +284,10 @@ them. Prefix `/api/lan-bridge`.
   "sessions": [ { "sessionId": "…", "title": "…", "running": false, "cwd": "…", "shared": true } ],
   "settings": { "name": "my-mac", "host": "127.0.0.1", "port": 5977, "insecureHttp": false,
                 "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
-                "tls": null },
+                "tls": null, "discovery": true },
+  "discovery": { "enabled": true, "listening": true, "error": null,
+                 "found": [ { "name": "my-pc", "host": "my-pc.local", "port": 5977,
+                              "address": "192.168.1.9", "version": "0.3.5", "protocol": "1" } ] },
   "addresses": ["127.0.0.1", "192.168.1.8"],
   "restartRequired": false
 }
@@ -304,7 +324,7 @@ Body (every field optional; the panel sends the whole set):
 ```json
 { "name": "my-mac", "host": "0.0.0.0", "port": 5977, "insecureHttp": true,
   "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
-  "tls": null }
+  "tls": null, "discovery": false }
 ```
 
 Success returns the **full state object** above (so a save needs no second read):
@@ -327,6 +347,8 @@ Rules:
   see: `bridge.hello` returns it immediately and `lan_dsh_peers list` shows it on the other
   machine after its next handshake. Renaming never rebinds the socket and never drops a
   connected peer.
+- `discovery` is a boolean: whether mDNS announces this machine (see *LAN discovery*
+  below). It applies on the next start of the plugin and never rebinds the HTTP listener.
 - `host` must be an IP literal (`127.0.0.1`, `0.0.0.0`, `192.168.1.8`, …) or `localhost`.
   `0.0.0.0` means every interface.
 - Binding any non-loopback address without TLS requires `insecureHttp: true`. Without it
@@ -344,6 +366,25 @@ Rules:
   at boot (the row's posture is used) instead of preventing the listener from starting.
 - These messages are operator-facing, so `error.message` is localized (Chinese); peer-facing
   errors stay English identifiers. Codes are shared.
+
+## LAN discovery (mDNS, optional)
+
+With `discovery.enabled` on (panel: 局域网发现, or `config.discovery.enabled`),
+the bridge announces itself with a bounded mDNS responder: a PTR question for
+`_dsh-lanbridge._tcp.local` on `224.0.0.251:5353` is answered with one PTR, one
+SRV (the listening port, resolved *after* the bind, so a port of 0 still
+advertises a real number), one TXT (`name`, `version`, `protocol`) and one A
+record for the first non-loopback IPv4 address. Announcements repeat every
+`discovery.intervalMs` (default 60 s) and answer a query immediately.
+
+`lan_dsh_peers action=discover` browses for 1.5 s and returns
+`{ name, address, port, version, url, known }` per bridge heard.
+
+Discovery is advertisement only. It carries **no token** and grants nothing: a
+discovered machine is a candidate, and driving it still needs a paired bearer
+token (`lan_dsh_peers action=add`) and an explicitly shared Session. That split
+is the point — the network may learn *where* a bridge is; only its operator
+decides *who may*.
 
 ## Compatibility
 

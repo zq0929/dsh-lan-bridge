@@ -15,6 +15,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { adoptGoal, emptyBoard } from '../lib/board.js'
 import { createStore } from '../lib/store.js'
 import { createApi } from '../lib/api.js'
 import { createServer } from '../lib/server.js'
@@ -24,6 +25,7 @@ import { installTools } from '../lib/tools.js'
 import { installUi } from '../lib/ui.js'
 import { createSettingsApplier, loadPersistedSettings } from '../lib/settings.js'
 import { localAddresses, resolveConfig } from '../lib/config.js'
+import { SERVICE, buildQuery, buildResponse, decodeName, encodeName, parsePacket } from '../lib/mdns.js'
 
 let failures = 0
 let passes = 0
@@ -873,6 +875,49 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   check('the peer dropped its copy', (await peerRpc('tasks.list', {}, peerToken)).body.result.tasks.every(task => task.id !== builtOnPeer.id))
   equal('hand-over output stays lossless JSON', undefinedPaths(backHome).join(','), '')
 
+  // --- goal convergence (two copies, ordered by revision) -----------------
+  // The board keeps one goal per machine, so "done" has to be decided
+  // mechanically: higher revision wins, equal revision with different text is a
+  // divergence to report. These assertions cover pull, push and that report.
+  const localStart = (await exec('lan_dsh_goal', { action: 'get' })).goal.revision
+  await exec('lan_dsh_goal', { action: 'set', expectedRevision: localStart, title: 'local plan', text: 'mine' })
+  const pushedSync = await exec('lan_dsh_goal', { action: 'sync', peer: 'hand-peer' })
+  equal('a newer local goal is pushed to the peer', pushedSync.synced[0].pushed, true)
+  const peerGoalAfterPush = (await peerRpc('goal.get', {}, peerToken)).body.result.goal
+  equal('the peer now holds this machine\'s goal', peerGoalAfterPush.title, 'local plan')
+  equal('the peers agree on the revision', peerGoalAfterPush.revision, localStart + 1)
+
+  // the peer writes next; a sync pulls it back
+  await peerRpc('goal.set', { expectedRevision: localStart + 1, title: 'peer plan', text: 'theirs' }, peerToken)
+  const pulledSync = await exec('lan_dsh_goal', { action: 'sync', peer: 'hand-peer' })
+  equal('a newer peer goal is pulled', pulledSync.synced[0].applied, true)
+  equal('this machine now shows the peer text', pulledSync.goal.text, 'theirs')
+
+  // equal revision, different text: reported, never silently resolved
+  const divergent = adoptGoal(
+    { ...emptyBoard(), goal: { revision: 4, title: 'a', text: 'a', updatedBy: 'x', updatedAt: 1 } },
+    { goal: { revision: 4, title: 'b', text: 'b' }, from: 'peer' },
+    'it-machine',
+  )
+  equal('a same-revision divergence is not applied', divergent.applied, false)
+  equal('a same-revision divergence is reported', divergent.diverged, true)
+  const older = adoptGoal(
+    { ...emptyBoard(), goal: { revision: 9, title: 'a', text: 'a', updatedBy: 'x', updatedAt: 1 } },
+    { goal: { revision: 3, title: 'b', text: 'b' }, from: 'peer' },
+    'it-machine',
+  )
+  equal('an older peer goal is ignored', older.applied, false)
+  equal('an older peer goal keeps this copy', older.goal.title, 'a')
+
+  // the RPC itself, and the board read that converges on its own
+  const adoptRpc = await rpc('goal.adopt', { goal: { revision: 42, title: 'rpc plan', text: 'rpc' }, from: 'peer' }, { token: handToken })
+  check('goal.adopt takes a higher revision over the wire', adoptRpc.body.result?.applied === true, JSON.stringify(adoptRpc.body).slice(0, 300))
+  await exec('lan_dsh_goal', { action: 'sync', peer: 'hand-peer' })
+  await peerRpc('goal.set', { expectedRevision: 42, title: 'peer ahead', text: 'ahead' }, peerToken)
+  const boarded = await exec('lan_dsh_board', { peer: 'hand-peer' })
+  check('reading the board converges the goal', (boarded.goalSync ?? []).some(entry => entry.applied === true), JSON.stringify(boarded.goalSync).slice(0, 200))
+  equal('the board shows the converged text', boarded.goal.text, 'ahead')
+
   await peerServer.stop()
   await rm(peerStateDir, { recursive: true, force: true })
   await exec('lan_dsh_peers', { action: 'remove', name: 'hand-peer' })
@@ -1011,6 +1056,71 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   const defaulted = await uiCall('pair', { name: 'it-ui-default' })
   equal('no list defaults to read+prompt', JSON.stringify(defaulted.capabilities), JSON.stringify(['read', 'prompt']))
   await uiCall('revoke', { name: 'it-ui-default' })
+}
+
+// --- mDNS codec ----------------------------------------------------------
+{
+  steps.push('')
+  steps.push('mdns codec')
+  const name = `it-machine.${SERVICE}`
+  const encoded = encodeName(name)
+  const decoded = decodeName(encoded, 0)
+  check('encodeName/decodeName round-trip', decoded.name === name, decoded.name)
+
+  const query = parsePacket(buildQuery())
+  check('query asks for the bridge service', query.questions[0]?.name === SERVICE && query.questions[0]?.type === 12, JSON.stringify(query.questions))
+
+  const packet = parsePacket(buildResponse({
+    instance: 'it-machine',
+    host: 'it-machine',
+    port: 5977,
+    address: '192.168.1.8',
+    txt: { name: 'it-machine', version: '0.3.5', protocol: '1' },
+  }))
+  check('announcement carries a PTR', packet.ptr[0]?.target === `it-machine.${SERVICE}`, JSON.stringify(packet.ptr))
+  check('announcement carries SRV port and target', packet.srv[0]?.port === 5977 && packet.srv[0]?.target === 'it-machine.local', JSON.stringify(packet.srv))
+  check('announcement carries TXT metadata', packet.txt[0]?.entries?.version === '0.3.5' && packet.txt[0]?.entries?.protocol === '1', JSON.stringify(packet.txt))
+  check('announcement carries the address', packet.a[0]?.address === '192.168.1.8', JSON.stringify(packet.a))
+  check('no token is ever announced', !JSON.stringify(packet).includes('lzb_'), 'txt/targets only')
+}
+
+// --- discovery tool without mDNS -----------------------------------------
+{
+  steps.push('')
+  steps.push('peers discover (mDNS off)')
+  const off = await tools.get('lan_dsh_peers').execute({ action: 'discover' }, { signal: undefined })
+  check('discover explains that mDNS is off', off.ok === false && /mDNS is off/.test(off.message), JSON.stringify(off).slice(0, 160))
+  check('discover still lists configured peers', Array.isArray(off.peers), `${String(off.peers?.length)} peer(s)`)
+  check('discover output is lossless JSON', undefinedPaths(off).length === 0, JSON.stringify(undefinedPaths(off)))
+}
+
+// --- discovery over real multicast (best effort) -------------------------
+{
+  steps.push('')
+  steps.push('mdns discovery (live, best effort)')
+  const { createDiscovery } = await import('../lib/mdns.js')
+  const alphaCfg = resolveConfig({ role: 'both', name: 'it-alpha', listen: { host: '127.0.0.1', port: 0 }, discovery: { enabled: true } }, { DSH_HOME: stateDir })
+  const betaCfg = resolveConfig({ role: 'both', name: 'it-beta', listen: { host: '127.0.0.1', port: 0 }, discovery: { enabled: true } }, { DSH_HOME: stateDir })
+  let alphaPort = 0
+  let betaPort = 0
+  const alpha = createDiscovery({ cfg: alphaCfg, portOf: () => alphaPort })
+  const beta = createDiscovery({ cfg: betaCfg, portOf: () => betaPort })
+  await alpha.start()
+  await beta.start()
+  alphaPort = 5977
+  betaPort = 5978
+  const alphaStatus = alpha.status()
+  if (alphaStatus.listening !== true) {
+    note(`multicast unavailable here (${String(alphaStatus.error ?? 'unknown')}); skipping the live discovery assertions`)
+  } else {
+    const found = await alpha.browse({ timeoutMs: 900 })
+    check('a peer announcing itself is discovered by name', found.some(entry => entry.name === 'it-beta'), JSON.stringify(found.map(entry => entry.name)))
+    const entry = found.find(candidate => candidate.name === 'it-beta')
+    check('the discovered entry carries a usable address and port', typeof entry?.address === 'string' && entry?.port === betaPort, JSON.stringify(entry))
+    check('a peer learns this machine in turn', (await beta.browse({ timeoutMs: 400 })).some(candidate => candidate.name === 'it-alpha'), 'beta sees alpha')
+  }
+  alpha.stop()
+  beta.stop()
 }
 
 // --- audit ---------------------------------------------------------------
