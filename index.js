@@ -67,20 +67,22 @@ export function apply(ctx, config) {
   // mDNS is how a peer finds this machine without anyone typing an address.
   // It carries the name, port and version only — never a token, so discovery
   // narrows "where" and pairing still decides "who may".
-  const discovery = cfg.discovery.enabled
-    ? createDiscovery({ cfg, logger, portOf: () => server.status.port ?? cfg.port })
-    : undefined
-  if (discovery !== undefined) {
-    ctx.effect(() => {
-      let stopped = false
+  const discovery = createDiscovery({ cfg, logger, portOf: () => server.status.port ?? cfg.port })
+  ctx.effect(() => {
+    let stopped = false
+    // Wait for the persisted settings: the switch lives in bridge.json, and it
+    // must win over the row config, so reading `cfg` before `ready` would start
+    // (or skip) the responder based on the wrong value.
+    void ready.then(() => {
+      if (stopped || cfg.discovery.enabled !== true) return
       void discovery.start()
-      return () => {
-        if (stopped) return
-        stopped = true
-        discovery.stop()
-      }
-    }, 'lan-bridge: mdns')
-  }
+    })
+    return () => {
+      if (stopped) return
+      stopped = true
+      discovery.stop()
+    }
+  }, 'lan-bridge: mdns')
 
   const applySettings = createSettingsApplier({ cfg, store, server, logger, ready })
 
