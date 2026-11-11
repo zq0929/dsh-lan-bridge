@@ -41,6 +41,11 @@ function check(label, condition, detail) {
   steps.push(`  FAIL ${label}${detail === undefined ? '' : ` — ${detail}`}`)
 }
 
+/** A skipped assertion that is not a failure: the environment cannot run it. */
+function note(message) {
+  steps.push(`  note ${message}`)
+}
+
 function equal(label, actual, expected) {
   check(label, actual === expected, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
 }
@@ -1136,6 +1141,67 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   check('discover never ships a bearer token to the model', !/lzb_[0-9a-f]{8}/.test(shipped)
     && (off.peers ?? []).every(peer => peer.token === undefined), shipped.slice(0, 200))
   check('discover output is lossless JSON', undefinedPaths(off).length === 0, JSON.stringify(undefinedPaths(off)))
+}
+
+// --- the responder's own lifecycle ---------------------------------------
+{
+  steps.push('')
+  steps.push('mdns responder lifecycle')
+  const { createDiscovery } = await import('../lib/mdns.js')
+  const { BridgeError } = await import('../lib/util.js')
+  const liveCfg = resolveConfig({ role: 'both', name: 'it-life', listen: { host: '127.0.0.1', port: 0 }, discovery: { enabled: true } }, { DSH_HOME: stateDir })
+
+  // Holding 5353 without SO_REUSEADDR makes the responder's bind fail, which is
+  // exactly the Windows case (several apps own 5353 there). The failure used to
+  // leave `start()` pending forever, and the panel awaits it when saving.
+  const dgram = await import('node:dgram')
+  const mdnsTestPort = Number(process.env.LAN_BRIDGE_MDNS_PORT ?? 5353)
+  const squatter = dgram.createSocket({ type: 'udp4', reuseAddr: false })
+  let squatted = false
+  try {
+    await new Promise((resolve, reject) => {
+      squatter.once('error', reject)
+      squatter.bind(mdnsTestPort, () => resolve())
+    })
+    squatted = true
+  } catch {
+    note(`UDP ${String(mdnsTestPort)} is already held by another app; skipping the busy-port assertions`)
+  }
+
+  if (squatted) {
+    const busy = createDiscovery({ cfg: liveCfg, logger: ctx.logger, portOf: () => 0 })
+    const settled = await Promise.race([
+      busy.start().then(() => 'settled'),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 3_000)),
+    ])
+    check('a busy 5353 settles start() instead of hanging it', settled === 'settled', settled)
+    check('a busy 5353 leaves the responder not listening', busy.status().listening === false, String(busy.status().listening))
+    check('a busy 5353 records why', typeof busy.status().error === 'string' && busy.status().error.length > 0, String(busy.status().error))
+    let browseError = null
+    try {
+      await busy.browse({ timeoutMs: 200 })
+    } catch (error) {
+      browseError = error
+    }
+    check('browsing an unbindable responder raises a typed error', browseError instanceof BridgeError, String(browseError))
+    check('that error explains itself instead of saying "Not running"', /mDNS is not listening/.test(String(browseError)), String(browseError))
+    busy.stop()
+    squatter.close()
+  }
+
+  // The panel turns the switch off and on again without restarting the Host.
+  const cycling = createDiscovery({ cfg: { ...liveCfg, name: 'it-cycle' }, logger: ctx.logger, portOf: () => 0 })
+  const first = await cycling.start()
+  if (first.listening !== true) {
+    note(`multicast unavailable here (${String(first.error ?? 'unknown')}); skipping the stop/start cycle`)
+  } else {
+    check('start is idempotent', (await cycling.start()).listening, true)
+    cycling.stop()
+    check('stop turns the responder off', cycling.status().listening === false, String(cycling.status().listening))
+    const rebind = await cycling.start()
+    check('a stopped responder can bind again (the panel toggles it)', rebind.listening, true)
+    cycling.stop()
+  }
 }
 
 // --- discovery over real multicast (best effort) -------------------------

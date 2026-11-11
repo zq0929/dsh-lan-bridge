@@ -26,6 +26,10 @@ jobs:
           for file in lib/*.js scripts/*.mjs; do node --check "$file"; done
       - name: offline integration suite
         run: node scripts/it-local.mjs
+      - name: offline suite, mDNS on a scratch port (busy-port path)
+        run: node scripts/it-local.mjs
+        env:
+          LAN_BRIDGE_MDNS_PORT: '15353'
       - name: panel smoke suite (renders the real client.js without React)
         run: node scripts/panel-smoke.mjs
       - name: fail if the run left state behind

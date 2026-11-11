@@ -389,6 +389,11 @@ record for the first non-loopback IPv4 address. Announcements repeat every
 The switch takes effect on save: turning it on starts the responder, turning it off stops
 it. A Host older than 0.3.9 needs a restart for either direction.
 
+A bind that cannot happen (another app owns UDP 5353 — routine on Windows) is reported, not
+swallowed: `start()` settles with `listening: false` and `status().error` carries the reason,
+browsing raises `bridge/method-unavailable` with that text, and saving settings still
+succeeds. Before 0.3.10 that case left `start()` pending forever.
+
 **mDNS is link-local.** `224.0.0.251` is not routed, so discovery only crosses machines
 that share a link (same subnet, or one bridged/VPN segment). Two machines that can reach
 each other's unicast port but sit behind a router will not see each other this way — that
