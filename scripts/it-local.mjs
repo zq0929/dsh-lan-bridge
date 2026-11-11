@@ -43,6 +43,16 @@ function equal(label, actual, expected) {
   check(label, actual === expected, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
 }
 
+/** Paths of every `undefined` value in a structure — the Host rejects these. */
+function undefinedPaths(value, path = '') {
+  if (value === undefined) return [path === '' ? '<root>' : path]
+  if (value === null || typeof value !== 'object') return []
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => undefinedPaths(item, `${path}[${String(index)}]`))
+  }
+  return Object.entries(value).flatMap(([key, item]) => undefinedPaths(item, path === '' ? key : `${path}.${key}`))
+}
+
 // ---------------------------------------------------------------------------
 // A minimal Cordis-shaped context: event bus, effects, service lookup.
 // ---------------------------------------------------------------------------
@@ -553,6 +563,16 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   const localShare = await exec('lan_dsh_share', { action: 'list' })
   equal('share list shows both local sessions', localShare.sessions.length, 2)
   equal('share list flags exactly one shared session', localShare.sessions.filter(item => item.shared === true).length, 1)
+  // The Host validates every tool result as lossless JSON: one `undefined`
+  // (an absent title or cwd) fails the whole call, which is exactly the bug a
+  // peer hit in the wild.
+  equal('share output stays lossless JSON', undefinedPaths(localShare).join(','), '')
+  fake.create({ sessionId: 'session-it-untitled' })
+  const shareUntitled = await exec('lan_dsh_share', { action: 'share', sessionId: 'session-it-untitled' })
+  const untitledRow = shareUntitled.sessions.find(item => item.sessionId === 'session-it-untitled')
+  equal('a Session without a title omits the key', untitledRow !== undefined && 'title' in untitledRow, false)
+  equal('untitled share output stays lossless JSON', undefinedPaths(shareUntitled).join(','), '')
+  await exec('lan_dsh_share', { action: 'unshare', sessionId: 'session-it-untitled' })
   const unshared = await exec('lan_dsh_share', { action: 'unshare', sessionId: target.summary.sessionId })
   equal('unshare ok', unshared.ok, true)
   const afterUnshare = await exec('lan_dsh_sessions', { peer: 'loopback' })
