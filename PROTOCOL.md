@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.0", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.1", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -253,7 +253,16 @@ setting in `settings` currently applies without a Host restart.
 
 ### `POST /api/lan-bridge.pair` → `{ "name": "peer-a", "capabilities": ["read","prompt"] }`
 
-→ `{ "ok": true, "token": "lzb_…" }`; the token is returned **once** and only stored hashed.
+→ `{ "ok": true, "name": "peer-a", "token": "lzb_…", "capabilities": ["read","prompt"] }`; the
+token is returned **once** and only stored hashed.
+
+`capabilities` is optional and may name any subset of
+`read`, `prompt`, `control`, `create`, `archive`, `collab` — the panel offers all six as
+toggles, so an operator can mint the same token here that `lan_dsh_peers action=pair` mints.
+Omitted → `["read","prompt"]`. Unknown names are ignored; a list that leaves no known
+capability is refused with `bridge/bad-request` and `details.field = "capabilities"` — a token
+that can do nothing is never what the operator meant. The panel also answers a refused
+mutation this way (`{ "ok": false, "error": { code, message, details } }`) instead of throwing.
 
 ### `POST /api/lan-bridge.revoke` → `{ "name": "peer-a" }` → `{ "ok": true }`
 

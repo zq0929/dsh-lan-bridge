@@ -60,6 +60,18 @@
 | `maxMessages` | 200 | 单次读历史条数上限 |
 | `rateLimitPerMinute` | 120 | 每 peer 每分钟请求上限 |
 
+### 面板里签发令牌时可以勾选全部六个能力位
+
+**设置 → 局域网桥 → 对等端 → 配对新对等端** 下面有一排能力开关：`read` / `prompt` /
+`control` / `create` / `archive` / `collab`，默认只勾 `read` + `prompt`。
+
+- 想让它能新建会话、归档、或者读写共享板，就在面板里勾上对应位——不必再退回
+  `lan_dsh_peers action=pair` 命令；
+- `control`（取消/改名/换模型）、`create`（新建会话）、`archive`（归档/恢复）、`collab`
+  （共享任务板与目标文档）都会让对等端**改变本机状态**，勾之前想清楚它是不是你信任的那台；
+- 令牌仍然只显示一次、只存散列；勾错的代价是「撤销后重新签一枚」，所以宁可少勾；
+- 列表为空会被拒绝（一个什么都不能做的 token 没有意义），未知名字会被忽略。
+
 ### 面板里可以直接改监听设置
 
 **设置 → 局域网桥 → 监听设置** 可以改「本机名称」`name` / `host` / `port` / `insecureHttp` /
@@ -117,7 +129,7 @@
 
 | 工具 | 作用 |
 | --- | --- |
-| `lan_dsh_peers` | `list` / `add` / `check` / `remove`：配置与探测 peer；`pair`：**本机**签发一次性 token（可指定 `capabilities`，面板只发 read+prompt） |
+| `lan_dsh_peers` | `list` / `add` / `check` / `remove`：配置与探测 peer；`pair`：**本机**签发一次性 token（可指定 `capabilities`；面板里也是六个能力位随便勾） |
 | `lan_dsh_archive` | `archive` / `unarchive` 会话（`peer` 省略则作用于本机）；归档不删历史，可撤销；运行中的会话要 `stopActivity` 才归档 |
 | `lan_dsh_share` | `list` / `share` / `unshare`：**本机**会话共享开关（peer 永远不能调这个） |
 | `lan_dsh_sessions` | 列 peer 共享出来的会话 |

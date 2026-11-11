@@ -842,6 +842,30 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('panel can issue an archive token', archivePaired.ok, true)
   check('archive token carries archive', archivePaired.capabilities.includes('archive'), JSON.stringify(archivePaired.capabilities))
   await uiCall('revoke', { name: 'it-ui-archiver' })
+
+  // The panel may mint any subset the Host knows, so an operator never has to
+  // fall back to a pair command to get collab or control.
+  const allCaps = ['read', 'prompt', 'control', 'create', 'archive', 'collab']
+  const everything = await uiCall('pair', { name: 'it-ui-everything', capabilities: allCaps })
+  equal('panel can issue a token with every capability', everything.ok, true)
+  equal('that token carries exactly those capabilities', JSON.stringify(everything.capabilities), JSON.stringify(allCaps))
+  await uiCall('revoke', { name: 'it-ui-everything' })
+
+  const collabOnly = await uiCall('pair', { name: 'it-ui-collab', capabilities: ['collab'] })
+  equal('one capability is enough', collabOnly.ok, true)
+  equal('collab survives alone', JSON.stringify(collabOnly.capabilities), JSON.stringify(['collab']))
+  await uiCall('revoke', { name: 'it-ui-collab' })
+
+  const noneAsked = await uiCall('pair', { name: 'it-ui-nothing', capabilities: [] })
+  equal('an empty capability list is refused', noneAsked.error?.code, 'bridge/bad-request')
+  equal('the refusal names the field', noneAsked.error?.details?.field, 'capabilities')
+
+  const unknownAsked = await uiCall('pair', { name: 'it-ui-unknown', capabilities: ['teleport'] })
+  equal('an unknown capability alone is refused', unknownAsked.error?.code, 'bridge/bad-request')
+
+  const defaulted = await uiCall('pair', { name: 'it-ui-default' })
+  equal('no list defaults to read+prompt', JSON.stringify(defaulted.capabilities), JSON.stringify(['read', 'prompt']))
+  await uiCall('revoke', { name: 'it-ui-default' })
 }
 
 // --- audit ---------------------------------------------------------------

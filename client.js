@@ -65,6 +65,10 @@ window.__ModuleLoader__.load({
         pairCancel: '取消',
         pairNameRequired: '请填写对等端名称',
         pairFailed: '配对失败',
+        pairCapabilities: '令牌权限',
+        pairCapNone: '至少选择一个权限',
+        pairCapHint: '控制、新建、归档、协作会授予对等端改变本机状态的能力；只读与发消息只能读和说话。',
+        pairCapsLine: '权限：{caps}',
         tokenMissing: '服务端没有返回令牌',
         revokeFailed: '撤销失败',
         shareFailed: '共享状态切换失败',
@@ -87,6 +91,7 @@ window.__ModuleLoader__.load({
         capWait: '等待',
         capTranscript: '记录',
         capCreate: '创建会话',
+        capCollab: '协作板',
         capRename: '重命名',
         capSelectModel: '切换模型',
         cancel: '取消',
@@ -165,6 +170,10 @@ window.__ModuleLoader__.load({
         pairCancel: 'Cancel',
         pairNameRequired: 'Enter a peer name',
         pairFailed: 'Pairing failed',
+        pairCapabilities: 'Token capabilities',
+        pairCapNone: 'Select at least one capability',
+        pairCapHint: 'Control, create, archive and collab let the peer change this machine; read and prompt only let it look and speak.',
+        pairCapsLine: 'Capabilities: {caps}',
         tokenMissing: 'The Host returned no token',
         revokeFailed: 'Revoke failed',
         shareFailed: 'Could not change sharing',
@@ -187,6 +196,7 @@ window.__ModuleLoader__.load({
         capWait: 'wait',
         capTranscript: 'transcript',
         capCreate: 'create',
+        capCollab: 'collab',
         capRename: 'rename',
         capSelectModel: 'select model',
         cancel: 'Cancel',
@@ -533,10 +543,21 @@ window.__ModuleLoader__.load({
       if (capability === 'wait') return t('capWait')
       if (capability === 'transcript') return t('capTranscript')
       if (capability === 'create') return t('capCreate')
+      if (capability === 'collab') return t('capCollab')
       if (capability === 'rename') return t('capRename')
       if (capability === 'selectModel') return t('capSelectModel')
       return capability
     }
+
+    /**
+     * Capabilities a token can carry, in the order the pair form offers them.
+     * Mirrors CAPABILITIES in lib/config.js; the Host stays the authority and
+     * drops names it does not know.
+     */
+    const PAIR_CAPABILITIES = ['read', 'prompt', 'control', 'create', 'archive', 'collab']
+
+    /** What a fresh token gets when the operator changes nothing. */
+    const DEFAULT_PAIR_CAPABILITIES = ['read', 'prompt']
 
     /** Relative age of a peer heartbeat, absolute beyond an hour. */
     function seenLabel(value, t) {
@@ -1212,6 +1233,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(false)
       const [failure, setFailure] = React.useState('')
       const [issued, setIssued] = React.useState(null)
+      const [caps, setCaps] = React.useState(DEFAULT_PAIR_CAPABILITIES)
       const [copyState, setCopyState] = React.useState('idle')
       const inputRef = React.useRef(null)
       const tokenRef = React.useRef(null)
@@ -1221,22 +1243,38 @@ window.__ModuleLoader__.load({
         inputRef.current.focus()
       }, [open])
 
+      /**
+       * Toggle one capability, keeping the canonical order so a token's
+       * capabilities read the same way every time it is issued.
+       */
+      const toggle = (capability) => {
+        setCaps((current) => (current.includes(capability)
+          ? current.filter((value) => value !== capability)
+          : PAIR_CAPABILITIES.filter((value) => value === capability || current.includes(value))))
+      }
+
       const submit = () => {
         const trimmed = name.trim()
         if (trimmed === '') {
           setFailure(t('pairNameRequired'))
           return
         }
+        // A token with no capability can do nothing; refuse instead of minting
+        // a credential that only looks useful.
+        if (caps.length === 0) {
+          setFailure(t('pairCapNone'))
+          return
+        }
         setBusy(true)
         setFailure('')
-        void mutate(ROUTE.pair, { name: trimmed })
+        void mutate(ROUTE.pair, { name: trimmed, capabilities: caps })
           .then((body) => {
             const token = text(body.token, '')
             // The contract promises the token exactly once: no token means the
             // peer was created but cannot be handed over, and saying so is
             // better than offering an empty field.
             if (token === '') throw new Error(t('tokenMissing'))
-            setIssued({ name: trimmed, token })
+            setIssued({ name: trimmed, token, capabilities: caps.slice() })
             void reload()
             setCopyState('idle')
             setName('')
@@ -1279,6 +1317,9 @@ window.__ModuleLoader__.load({
         issued === null ? null : h('div', { className: 'dslb-token' },
           h('div', { className: 'dslb-tokenTitle' }, t('tokenTitle')),
           h('div', { className: 'dslb-desc' }, t('tokenFor', { name: issued.name })),
+          h('div', { className: 'dslb-desc' }, t('pairCapsLine', {
+            caps: issued.capabilities.map((capability) => capabilityLabel(capability, t)).join(' / '),
+          })),
           h('div', { className: 'dslb-tokenRow' },
             h('input', {
               ref: tokenRef,
@@ -1318,6 +1359,18 @@ window.__ModuleLoader__.load({
                 if (event.key === 'Escape' && !busy) setOpen(false)
               },
             }),
+            h('div', { className: 'dslb-chipsPick', 'aria-label': t('pairCapabilities') },
+              h('span', { className: 'dslb-chipsPickLabel' }, t('pairCapabilities')),
+              PAIR_CAPABILITIES.map((capability) => h('button', {
+                key: capability,
+                type: 'button',
+                className: 'dslb-chipPick',
+                'data-current': caps.includes(capability) ? '1' : '0',
+                'aria-pressed': caps.includes(capability) ? 'true' : 'false',
+                disabled: busy,
+                onClick: () => toggle(capability),
+              }, capabilityLabel(capability, t)))),
+            h('span', { className: 'dslb-formHint' }, t('pairCapHint')),
             h('button', {
               type: 'button',
               className: 'dslb-btn',
