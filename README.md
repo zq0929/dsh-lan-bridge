@@ -36,7 +36,7 @@
 # 2) 在 DSH 里用插件管理器安装这个目录（绝对路径）
 #    plugin_manager action=install_bundle target=/绝对路径/dsh-lan-bridge
 # 3) 重启 DSH（桌面版退出重开），插件按 cordis.patch.yml 的默认配置挂载：
-#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 8 个工具 + 面板
+#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 11 个工具 + 面板
 ```
 
 装完在 Web UI 里应该能看到「局域网桥」面板（会话共享开关 / peer 列表 / 配对）。
@@ -105,7 +105,7 @@
 
 两个方向别混：**面板的“配对 peer”发的是入站 token**（别人来控我）；**出站**（我去控别人）只能在
 控制侧用 `lan_dsh_peers action=add` 加，把对方面板给的 URL+token 填进去。想给对方 `control`（取消/改名/
-切模型）或 `create`/`archive` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive"]`
+切模型）或 `create`/`archive`/`collab` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]`
 在 A 上签发，再把 token 交给 B。
 
 ## 对端提示词
@@ -122,7 +122,10 @@
 | `lan_dsh_share` | `list` / `share` / `unshare`：**本机**会话共享开关（peer 永远不能调这个） |
 | `lan_dsh_sessions` | 列 peer 共享出来的会话 |
 | `lan_dsh_transcript` | 读 peer 某会话的历史尾部（含 `seq type` 预览） |
-| `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复 |
+| `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复；可带 `intent` 说明意图 |
+| `lan_dsh_board` | 读共享板：两台机器的任务 + 目标文档（`machine/id` 命名空间，只读合并） |
+| `lan_dsh_task` | 在共享板上建任务 / 按 revision CAS 改任务（认领、完成、改依赖、改派） |
+| `lan_dsh_goal` | 读 / CAS 写共享目标文档（"什么叫做完"写在这里） |
 | `lan_dsh_wait` | 继续等一个还在跑的回合 |
 | `lan_dsh_cancel` | 打断 peer 当前回合 |
 
@@ -142,6 +145,57 @@
 
 审批（approval）与提问（ask_user_question）**不在 v1 支持范围内**：远端回合卡在审批时，
 `lan_dsh_prompt`/`lan_dsh_wait` 返回 `reason: "input-required"`，需要 A 机上的人点一下。
+
+### 共享板：把"做到哪一步"也送过去
+
+意图信封解决的是一句话里的"为什么"。跨机的**多回合协作**还需要一个双方都能读写的状态：谁在做什么、什么卡住什么、什么叫做完。这就是共享板（`lan_dsh_board` / `lan_dsh_task` / `lan_dsh_goal`）。
+
+它按"谁创建谁拥有"复制，而不是搞一个中心库：
+
+```
+本机 board（bridge.json）        对端 board（对端 bridge.json）
+  tasks: t-abc …                 tasks: t-xyz …
+  goal:  revision 3              goal:  revision 3
+        ↑                              ↑
+        └── 读的时候各自 pull 对方 ─────┘   （对端离线也能工作）
+```
+
+- **任务只在创建它的机器上可改**：跨机冲突从结构上消失，不需要合并算法；合并读出来的 id 带机器前缀（`my-mac/t-abc`），两台机器不会撞 id。
+- **改任务必须带 revision**（CAS）：读到 rev 2 才能写 rev 2，过期写入返回 `board/conflict` 并附上当前任务，让你重读再试，绝不盲改。
+- **目标文档是双方都写的那一份**：同样用 revision 保护，谁后写谁的 `updatedBy` 记谁；`revision` 递增，读到旧值就重读。
+- **依赖是建议性的**：`blockedBy` 里有未完成的任务，`ready` 就是 false；对方不可达时任务仍然可读，只是标 `unreachable`。
+- 全部方法都要 `collab` 能力位（面板签的 token 默认**没有**它），所以对端即使拿到默认 token 也读不到你的板。
+
+两个典型用法：
+
+```jsonc
+// A 机把活拆开，写给两边看
+{ "action": "create", "subject": "把 0.3.0 发出去",
+  "blockedBy": [], "assignee": "my-mac" }
+// B 机读到后认领自己那半（B 只能改 B 自己建的任务，所以 A 建的任务由 A 认领，
+// 或者 A 用 taskAction=reassign 指定 assignee）
+{ "action": "update", "taskId": "t-abc", "expectedRevision": 2, "taskAction": "claim" }
+// 双方对"做完"达成一致
+{ "action": "set", "expectedRevision": 0, "title": "0.3.0",
+  "text": "done = 两台机器都能读回同一条 goal，且 board 测试全绿" }
+```
+
+### 意图信封：把"为什么发这条"也送过去
+
+只发文本时，对端只能从一个接一个的句子里猜你的计划。给 `lan_dsh_prompt` 加 `intent`，桥会在文本之前渲染一个定界块，对端的 agent 就能按计划而不是按修辞回应：
+
+```jsonc
+{ "peer": "a-mac", "sessionId": "session-…", "text": "先跑单元测试，失败就停下来汇报",
+  "intent": {
+    "goal": "确认 main 分支还能过 CI",
+    "plan": ["跑 pnpm test", "失败则只报前三条原因", "通过则跑一次真机 e2e"],
+    "expects": "通过/失败 + 失败原因，不要建议改法",
+    "deadline": "这一回合内",
+    "format": "三行以内"
+  } }
+```
+
+对端收到的是 `[lan-bridge intent] … [/lan-bridge intent]` 块加正文。信封是**建议性的**：对端忽略它也能看到一条普通提示词；格式不合法（缺 `goal`、`plan` 不是数组、字段超长）会被 `bridge/bad-request` 拒掉。收到的信封会按会话保存在接收方（最新 20 条），可用 RPC `session.intents` 读回，方便复盘"当时为什么要发这句"。
 这是有意的：让远端代替你点“允许”比不实现更危险。
 
 ## 已知限制

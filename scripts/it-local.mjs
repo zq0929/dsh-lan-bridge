@@ -435,6 +435,100 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   check('wait returns the assistant reply', texts.includes('PONG: ping'), texts.slice(0, 200))
 }
 
+// --- intent envelope -----------------------------------------------------
+{
+  steps.push('')
+  steps.push('intent envelope')
+  const sent = await rpc('session.prompt', {
+    sessionId: target.summary.sessionId,
+    text: 'ping once',
+    intent: {
+      goal: 'prove the intent envelope rides along',
+      plan: ['send one prompt', 'read the tail'],
+      expects: 'PONG only',
+      deadline: 'this turn',
+      format: 'two letters',
+    },
+  }, { token })
+  equal('prompt with intent accepted', sent.body.ok, true)
+  equal('prompt reports the envelope', sent.body.result.intent, true)
+  const tail = await rpc('session.transcript', { sessionId: target.summary.sessionId }, { token })
+  const blob = JSON.stringify(tail.body.result.records)
+  check('intent block is rendered', blob.includes('[lan-bridge intent]'), blob.slice(0, 300))
+  check('intent goal is rendered', blob.includes('goal: prove the intent envelope rides along'))
+  check('intent plan is numbered', blob.includes('1. send one prompt') && blob.includes('2. read the tail'))
+  check('intent expects is rendered', blob.includes('expects: PONG only'))
+  const stored = await rpc('session.intents', { sessionId: target.summary.sessionId }, { token })
+  equal('intent is remembered', stored.body.result.intents.length, 1)
+  equal('remembered intent keeps the goal', stored.body.result.intents[0].goal, 'prove the intent envelope rides along')
+  equal('remembered intent names the sender', stored.body.result.intents[0].peer, 'it-peer')
+  const badGoal = await rpc('session.prompt', { sessionId: target.summary.sessionId, text: 'x', intent: {} }, { token })
+  equal('intent without a goal is rejected', badGoal.body.error.code, 'bridge/bad-request')
+  const badPlan = await rpc('session.prompt', { sessionId: target.summary.sessionId, text: 'x', intent: { goal: 'g', plan: 'nope' } }, { token })
+  equal('intent plan must be an array', badPlan.body.error.code, 'bridge/bad-request')
+  const tooMany = await rpc('session.prompt', {
+    sessionId: target.summary.sessionId,
+    text: 'x',
+    intent: { goal: 'g', plan: Array.from({ length: 21 }, (_, index) => `step ${String(index)}`) },
+  }, { token })
+  equal('intent plan is bounded', tooMany.body.error.code, 'bridge/bad-request')
+  const plain = await rpc('session.prompt', { sessionId: target.summary.sessionId, text: 'no envelope' }, { token })
+  equal('a plain prompt is unchanged', plain.body.result.intent, undefined)
+  const reader = await rpc('session.intents', { sessionId: target.summary.sessionId }, { token: readOnly.token })
+  equal('read-only peer may read intents', reader.body.ok, true)
+}
+
+// --- shared board --------------------------------------------------------
+{
+  steps.push('')
+  steps.push('board')
+  const collab = await store.pair({ name: 'it-collab', capabilities: ['read', 'collab'] })
+  const denied = await rpc('tasks.list', {}, { token })
+  equal('board needs the collab capability', denied.body.error.code, 'bridge/forbidden')
+  const created = await rpc('tasks.create', {
+    subject: 'ship the board',
+    description: 'two machines agree on what done means',
+    writeScopes: ['lib/board.js'],
+  }, { token: collab.token })
+  equal('task created', created.body.ok, true)
+  const task = created.body.result.task
+  equal('task starts pending', task.status, 'pending')
+  equal('task starts ready', task.ready, true)
+  equal('task names this machine as creator', created.body.result.name, cfg.name)
+  const listed = await rpc('tasks.list', {}, { token: collab.token })
+  equal('board lists the task', listed.body.result.tasks.length, 1)
+  const stale = await rpc('tasks.update', { taskId: task.id, expectedRevision: 99, action: 'claim' }, { token: collab.token })
+  equal('stale revision → board/conflict', stale.body.error.code, 'board/conflict')
+  equal('conflict reports the current revision', stale.body.error.details.currentRevision, 1)
+  const claimed = await rpc('tasks.update', { taskId: task.id, expectedRevision: 1, action: 'claim' }, { token: collab.token })
+  equal('claim bumps the revision', claimed.body.result.task.revision, 2)
+  equal('claim marks in progress', claimed.body.result.task.status, 'in_progress')
+  const done = await rpc('tasks.update', { taskId: task.id, expectedRevision: 2, action: 'complete' }, { token: collab.token })
+  equal('complete marks the task done', done.body.result.task.status, 'completed')
+  const readyChild = await rpc('tasks.create', { subject: 'after the board', blockedBy: [task.id] }, { token: collab.token })
+  equal('a task blocked by a done task is ready', readyChild.body.result.task.ready, true)
+  const waitingChild = await rpc('tasks.create', { subject: 'waits on the unknown', blockedBy: ['t-missing'] }, { token: collab.token })
+  equal('unknown blockers keep a task unready', waitingChild.body.result.task.ready, false)
+  const unknownTask = await rpc('tasks.update', { taskId: 't-nope', expectedRevision: 1, action: 'claim' }, { token: collab.token })
+  equal('unknown task → board/not-found', unknownTask.body.error.code, 'board/not-found')
+  equal('goal read needs collab too',
+    (await rpc('goal.get', {}, { token })).body.error.code, 'bridge/forbidden')
+  const empty = await rpc('goal.get', {}, { token: collab.token })
+  equal('a fresh goal is revision 0', empty.body.result.goal.revision, 0)
+  const first = await rpc('goal.set', { expectedRevision: 0, title: 'ship v0.3', text: 'done = board tests green' }, { token: collab.token })
+  equal('goal written', first.body.result.goal.revision, 1)
+  equal('goal authoring is recorded', typeof first.body.result.goal.updatedBy === 'string' && first.body.result.goal.updatedBy !== '', true)
+  const goalConflict = await rpc('goal.set', { expectedRevision: 0, text: 'silent overwrite' }, { token: collab.token })
+  equal('stale goal write → board/conflict', goalConflict.body.error.code, 'board/conflict')
+  equal('goal conflict carries the live document', goalConflict.body.error.details.goal.text, 'done = board tests green')
+  const secondWrite = await rpc('goal.set', { expectedRevision: 1, text: 'done = board + ledger tests green' }, { token: collab.token })
+  equal('a fresh revision writes through', secondWrite.body.result.goal.revision, 2)
+  equal('goal keeps its title across writes', secondWrite.body.result.goal.title, 'ship v0.3')
+  const persisted = await store.board()
+  equal('board survives in the state file', Object.keys(persisted.tasks).length, 3)
+  await store.revoke('it-collab')
+}
+
 // --- input-required ------------------------------------------------------
 {
   steps.push('')
@@ -527,8 +621,8 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 {
   steps.push('')
   steps.push('tools')
-  equal('eight tools registered', tools.size, 8)
-  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive']) {
+  equal('eleven tools registered', tools.size, 11)
+  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal']) {
     check(`tool ${name} present`, tools.has(name))
   }
   const exec = async (name, args) => tools.get(name).execute(args, { signal: undefined })
@@ -592,6 +686,51 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   const localRestored = await exec('lan_dsh_archive', { action: 'unarchive', sessionId: target.summary.sessionId })
   equal('tool unarchive on this machine ok', localRestored.archived, false)
   await exec('lan_dsh_peers', { action: 'remove', name: 'arch-peer' })
+
+  // board through the tools: local writes, then a merged read over the wire —
+  // merging needs a peer whose token carries the collab capability.
+  const collabPeer = await exec('lan_dsh_peers', { action: 'pair', name: 'board-peer', capabilities: ['read', 'collab'] })
+  const localTask = await exec('lan_dsh_task', { action: 'create', subject: 'wire the board tool', assignee: cfg.name })
+  equal('task tool creates a task', localTask.ok, true)
+  equal('task tool returns the id', typeof localTask.task?.id, 'string')
+  const claimedByTool = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: localTask.task.id,
+    expectedRevision: localTask.task.revision,
+    taskAction: 'claim',
+  })
+  equal('task tool claims', claimedByTool.task.status, 'in_progress')
+  const staleToolWrite = await exec('lan_dsh_task', {
+    action: 'update',
+    taskId: localTask.task.id,
+    expectedRevision: 1,
+    taskAction: 'complete',
+  }).then(value => value, error => ({ error: String(error?.message ?? error) }))
+  check('stale tool write fails loudly', typeof staleToolWrite.error === 'string', JSON.stringify(staleToolWrite).slice(0, 200))
+  const goalBefore = await exec('lan_dsh_goal', { action: 'get' })
+  const goalSet = await exec('lan_dsh_goal', {
+    action: 'set',
+    expectedRevision: goalBefore.goal.revision,
+    title: 'wire the goal tool',
+    text: 'done = board tool reads back',
+  })
+  equal('goal tool writes', goalSet.goal.revision, goalBefore.goal.revision + 1)
+  const goalRead = await exec('lan_dsh_goal', { action: 'get' })
+  equal('goal tool reads back', goalRead.goal.title, 'wire the goal tool')
+  await exec('lan_dsh_peers', { action: 'add', name: 'board-peer', url, token: collabPeer.token })
+  const merged = await exec('lan_dsh_board', { peer: 'board-peer' })
+  equal('board tool answers', merged.ok, true)
+  const peerRow = merged.machines.find(machine => machine.name === 'board-peer')
+  equal('board tool reaches the peer', peerRow.reachable, true)
+  const localRow = merged.machines.find(machine => machine.name === cfg.name)
+  check('merged read qualifies this machine\'s ids', JSON.stringify(localRow.tasks).includes(`${cfg.name}/${localTask.task.id}`), JSON.stringify(localRow.tasks).slice(0, 200))
+  check('merged read qualifies the peer\'s ids', (peerRow.tasks ?? []).every(task => String(task.qualifiedId).startsWith('board-peer/')), JSON.stringify(peerRow.tasks).slice(0, 200))
+  const remoteTask = await exec('lan_dsh_task', { action: 'create', peer: 'board-peer', subject: 'created over the wire' })
+  equal('task tool writes on the peer', remoteTask.ok, true)
+  const remoteGoal = await exec('lan_dsh_goal', { action: 'get', peer: 'board-peer' })
+  equal('goal tool reads the peer document', remoteGoal.goal.title, 'wire the goal tool')
+  equal('board tool output stays lossless JSON', undefinedPaths(merged).join(','), '')
+  await exec('lan_dsh_peers', { action: 'remove', name: 'board-peer' })
 
   const removed = await exec('lan_dsh_peers', { action: 'remove', name: 'loopback' })
   equal('peer remove ok', removed.ok, true)

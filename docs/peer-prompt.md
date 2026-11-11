@@ -53,6 +53,16 @@
 
 ---
 
+## 2.5 多回合协作时加一句（共享板）
+
+单发一条任务用上面那段就够。要让两边**多回合推进同一件事**（"你做 A、我做 B、什么叫做完"），再加这段：
+
+> 这次不是一问一答，我们有两个共享工具：`lan_dsh_board` 读板、`lan_dsh_task` 改板、`lan_dsh_goal` 读写目标文档。
+> 开工前先 `lan_dsh_board` 看两边已有的任务和目标；需要新增活时用 `lan_dsh_task action=create`，**任务只在创建它的机器上可改**，别试图改对方建的。
+> 改任务必须带 `expectedRevision`（也就是你刚读到的 `revision`）；回 `board/conflict` 说明你读到的是旧值，重读再写，不要硬重试。
+> 目标文档（goal）是双方都写的那一份，第一次写 `expectedRevision: 0`，之后每次都要带当前 revision。
+> 这两个工具需要 `collab` 能力：如果你的 token 没有，说明本机 operator 没签，别尝试绕过，直接告诉用户。
+
 ## 3. 出错时的短句（复制给 B 机 agent）
 
 | 你看到的错误 | 让 B 机 agent 怎么做 |

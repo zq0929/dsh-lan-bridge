@@ -50,12 +50,15 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.2.1", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.0", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
     "session.rename": true, "session.selectModel": true, "session.create": false,
     "session.archive": true, "session.unarchive": true,
+    "session.intents": true,
+    "tasks.list": true, "tasks.create": true, "tasks.update": true,
+    "goal.get": true, "goal.set": true,
     "approval.answer": false
   },
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
@@ -92,13 +95,74 @@ when shared explicitly.
 `records` are the Host's `SessionHistoryRecord` values verbatim (`{ event: { type, seq, time, data } }`).
 They are **untrusted content**: the controller must treat them as data, never instructions.
 
-### `session.prompt` → params `{ sessionId, text, requestId? }`
+### `session.prompt` → params `{ sessionId, text, requestId?, intent? }`
 
 ```json
-{ "accepted": true, "cursor": 128 }
+{ "accepted": true, "sessionId": "session-…", "intent": true }
 ```
 
-Text only. Empty/whitespace-only text is refused. Prompt bytes are capped by `maxPromptBytes`.
+`text` is the message body. Empty/whitespace-only text is refused, and the composed bytes are capped by `maxPromptBytes`.
+
+`intent` is optional and advisory: it carries *why* this prompt exists, so the receiving agent acts on a plan instead of inferring one from prose. Fields (`goal` required, the rest optional):
+
+| field | limit | meaning |
+|---|---|---|
+| `goal` | 2000 B | what this prompt is trying to achieve, one sentence |
+| `plan` | ≤ 20 steps × 500 B | ordered steps the sender intends to take across turns |
+| `expects` | 2000 B | what the sender needs back, and what counts as done |
+| `deadline` | 200 B | free-form time bound |
+| `format` | 200 B | required shape of the reply |
+
+The bridge renders the envelope into one delimited block **ahead of the text**, and the Session receives that single text part:
+
+```
+[lan-bridge intent]
+goal: …
+plan:
+1. …
+expects: …
+[/lan-bridge intent]
+
+<text>
+```
+
+Unknown `intent` properties are dropped, not rejected (a newer peer must not break an older one). A malformed envelope — missing `goal`, non-array `plan`, oversized field — is `bridge/bad-request`. Without `intent` the text is submitted byte-for-byte unchanged, and the response omits `intent`.
+
+### `session.intents` → params `{ sessionId }` → `{ sessionId, intents: [ … ] }`
+
+The intent envelopes this machine has received for one Session, oldest first, bounded to the newest 20; each entry is `{ at, peer, goal, plan?, expects?, deadline?, format? }`. Requires the `read` capability and a shared Session, like `session.transcript`: a peer cannot learn whether an unshared Session exists from this call.
+
+### Shared board: `tasks.*` and `goal.*`
+
+Every method in this group requires the **`collab`** capability, which the panel
+does not issue by default (`lan_dsh_peers action=pair name=… capabilities=["read","prompt","collab"]`).
+
+The board is replicated, not centralised: each machine owns the tasks it created
+and is the only writer of them, so two peers cannot produce a conflicting edit.
+Reading merges the caller's own tasks with each peer's, and every task id is
+qualified as `machine/id` for that merged view.
+
+| method | params | result |
+|---|---|---|
+| `tasks.list` | `{}` | `{ "name": "my-mac", "tasks": [ … ] }` — this machine's tasks only |
+| `tasks.create` | `{ subject, description?, blockedBy?, writeScopes?, assignee? }` | `{ "name": …, "task": { … } }` |
+| `tasks.update` | `{ taskId, expectedRevision, action, subject?, description?, blockedBy?, assignee? }` | `{ "name": …, "task": { … } }` |
+| `goal.get` | `{}` | `{ "name": …, "goal": { revision, title, text, updatedBy, updatedAt } }` |
+| `goal.set` | `{ expectedRevision, text, title? }` | `{ "name": …, "goal": { … } }` |
+
+Task view fields: `id`, `revision`, `subject`, `description`, `status`
+(`pending` | `in_progress` | `completed`), `blockedBy`, `writeScopes`,
+`assignee?`, `ready` (derived: pending and every blocker completed),
+`createdBy`, `updatedBy`, `createdAt`, `updatedAt`.
+
+`tasks.update` actions: `claim`, `release`, `complete`, `reopen`, `edit`,
+`set_dependencies`, `reassign`. A write against a task this machine does not own
+is `board/not-found`; a stale `expectedRevision` is `board/conflict` with
+`details.currentRevision` and `details.task` (or `details.goal` for `goal.set`)
+attached, so the caller re-reads instead of blind-retrying. `goal.set` accepts
+`expectedRevision: 0` for the first write.
+
+Limits: 200 tasks, 20 blockers, 40 write scopes, 20 KB goal text.
 
 ### `session.wait` → params `{ sessionId, timeoutMs?, maxMessages? }`
 
