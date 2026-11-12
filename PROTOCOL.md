@@ -50,7 +50,8 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.4.3", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.4.4", "name": "my-mac",
+  "diskVersion": "0.4.4", "drift": false,
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -61,6 +62,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
     "tasks.transfer": true, "tasks.adopt": true,
     "goal.get": true, "goal.set": true, "goal.clear": true, "goal.adopt": true,
     "approval.list": true, "approval.answer": true,
+    "audit.tail": true,
     "files.roots": true, "files.stat": true, "files.list": true, "files.read": true,
     "files.begin": true, "files.chunk": true, "files.commit": true, "files.abort": true
   },
@@ -349,6 +351,22 @@ mirrors the same flag. Newly created Sessions are shared automatically.
 Both `session.archive` and `session.unarchive` require the `archive` capability and a shared
 Session. Tokens do **not** carry `archive` unless the operator issuing the token asked for it.
 
+### `audit.tail` → params `{ limit? }` → `{ "entries": [ … ] }`
+
+The receiver's own audit trail, newest last, at most 200 lines (default 20). Each
+line is what that machine recorded for one call: `{ t, peer, method, path?, outcome?, code?, ok? }`.
+Reading it needs `read`, and it only ever covers that machine's own trail — a
+peer cannot ask for someone else's. Rotated trails (`audit.jsonl.1`) are included
+when the live file is short, and a torn final line from a hard stop is skipped.
+
+## Versions: `version`, `diskVersion`, `drift`
+
+`version` is the code this Host loaded at startup. `diskVersion` is what
+`package.json` says right now. They are separate because the Host does not
+hot-reload plugins: after an upgrade the process keeps running the old code until
+it restarts, and `drift: true` is how a caller learns that. It is advice, never an
+error — the older code keeps serving.
+
 ## SSE stream
 
 `GET /events?session=<id>` (also accepts `&assistant=1`) emits, in order:
@@ -378,9 +396,12 @@ them. Prefix `/api/lan-bridge`.
 {
   "role": "both", "name": "my-mac",
   "listen": { "host": "127.0.0.1", "port": 5977, "protocol": "http", "listening": true, "error": null },
+  "version": { "running": "0.4.4", "disk": "0.4.4", "drift": false },
   "capabilities": ["read", "prompt", "control", "create", "archive", "collab"],
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
               "rateLimitPerMinute": 120, "allowPeersToCreateSessions": false },
+  "audit": [ { "t": "2026-11-12T09:03:11.000Z", "peer": "peer-b", "method": "session.prompt",
+               "outcome": "ok" } ],
   "inbound": [ { "name": "peer-a", "masked": "…a1b2", "createdAt": 1762…, "lastSeenAt": 1762…,
                  "capabilities": ["read", "prompt"] } ],
   "outbound": [ { "name": "peer-b", "url": "http://192.168.1.8:5977", "reachable": true,

@@ -442,6 +442,11 @@ const readOnly = await store.pair({ name: 'it-reader', capabilities: ['read'] })
   const hello = await rpc('bridge.hello', {}, { token })
   equal('hello ok', hello.body.ok, true)
   equal('hello protocol', hello.body.result.protocol, 1)
+  // Two numbers, because an upgrade only lands on disk: until the Host restarts
+  // the process runs the old code, and nothing else can report that gap.
+  check('hello reports the running version', typeof hello.body.result.version === 'string' && hello.body.result.version.length > 0, String(hello.body.result.version))
+  equal('hello reports the same version on disk in this checkout', hello.body.result.diskVersion, hello.body.result.version)
+  equal('no drift right after loading', hello.body.result.drift, false)
   equal('hello app', hello.body.result.app, 'dsh-lan-bridge')
   const unknown = await rpc('bridge.nope', {}, { token })
   equal('unknown method → ok:false', unknown.body.ok, false)
@@ -779,8 +784,8 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 {
   steps.push('')
   steps.push('tools')
-  equal('fifteen tools registered', tools.size, 15)
-  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal', 'lan_dsh_approval', 'lan_dsh_push_file', 'lan_dsh_pull_file', 'lan_dsh_files']) {
+  equal('eighteen tools registered', tools.size, 18)
+  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal', 'lan_dsh_approval', 'lan_dsh_audit', 'lan_dsh_push_file', 'lan_dsh_pull_file', 'lan_dsh_push_files', 'lan_dsh_pull_files', 'lan_dsh_files']) {
     check(`tool ${name} present`, tools.has(name))
   }
   const exec = async (name, args) => tools.get(name).execute(args, { signal: undefined })
@@ -1114,6 +1119,11 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('state exposes the create-session switch', initial.settings.allowPeersToCreateSessions, false)
   check('state lists local addresses', Array.isArray(initial.addresses) && initial.addresses.includes('127.0.0.1'), JSON.stringify(initial.addresses))
   equal('state has no restart pending', initial.restartRequired, false)
+  // The panel renders its own copy of the version, so the Host has to hand over
+  // both sides of the pair and a verdict, not just its own number.
+  check('state exposes the version pair', typeof initial.version?.running === 'string' && typeof initial.version?.disk === 'string', JSON.stringify(initial.version))
+  equal('state agrees there is no drift', initial.version.drift, false)
+  check('state carries an audit tail', Array.isArray(initial.audit), typeof initial.audit)
 
   const badHost = await uiCall('settings', { host: 'example.local' })
   equal('non-literal host refused', badHost.ok, false)
@@ -1734,6 +1744,43 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   check('missing files capability is forbidden', forbiddenPush instanceof Error && forbiddenPush.code === 'bridge/forbidden', String(forbiddenPush?.code))
   check('missing files capability explains the grant',
     forbiddenPush instanceof Error && String(forbiddenPush.message).includes('action=grant'), String(forbiddenPush))
+  // A batch is one tool call over N single-file transfers: the good ones must
+  // land even when a neighbour fails, and the summary has to say which failed.
+  const secondText = join(localDir, 'second.txt')
+  await writeFile(secondText, 'second file in the batch\n')
+  const batch = await execTool('lan_dsh_push_files', {
+    peer: 'self-files',
+    root: 'drop',
+    files: [
+      { localPath: textPath, remotePath: 'docs/batch-a.txt' },
+      { localPath: join(localDir, 'missing.txt'), remotePath: 'docs/batch-missing.txt' },
+      { localPath: secondText, remotePath: 'docs/batch-b.txt' },
+    ],
+  })
+  equal('batch push keeps going past a failure', `${String(batch.sent)}/${String(batch.failed)}`, '2/1')
+  equal('batch push reports one result per file', batch.results.length, 3)
+  check('batch push marks the missing file',
+    batch.results.some(entry => entry.ok === false && entry.code === 'bridge/not-found'),
+    JSON.stringify(batch.results.map(entry => [entry.ok, entry.code])))
+  const batchList = await execTool('lan_dsh_files', { peer: 'self-files', action: 'list', root: 'drop', path: 'docs' })
+  check('batch push landed both good files',
+    ['batch-a.txt', 'batch-b.txt'].every(name => batchList.entries.some(entry => entry.name === name)),
+    JSON.stringify(batchList.entries.map(entry => entry.name)))
+  const pulledBatch = await execTool('lan_dsh_pull_files', {
+    peer: 'self-files',
+    root: 'drop',
+    files: [
+      { remotePath: 'docs/batch-a.txt', localPath: join(localDir, 'back-a.txt') },
+      { remotePath: 'docs/absent.txt', localPath: join(localDir, 'back-absent.txt') },
+      { remotePath: 'docs/batch-b.txt', localPath: join(localDir, 'back-b.txt') },
+    ],
+  })
+  equal('batch pull keeps going past a failure', `${String(pulledBatch.sent)}/${String(pulledBatch.failed)}`, '2/1')
+  equal('batch pull compares bytes on the way back', await readFile(join(localDir, 'back-b.txt'), 'utf8'), 'second file in the batch\n')
+  const emptyBatch = await execTool('lan_dsh_push_files', { peer: 'self-files', root: 'drop', files: [] }).then(() => undefined, error => error)
+  check('empty batch is a bad request',
+    emptyBatch instanceof Error && emptyBatch.code === 'bridge/bad-request', String(emptyBatch?.code))
+
   await store.removeOutbound('self-weak')
   await store.revoke('files-weak')
   await store.removeOutbound('self-files')
@@ -1752,6 +1799,28 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   check('audit names the peer', lines.some(line => line.peer === 'it-peer'))
   check('audit records the method', lines.some(line => line.method === 'session.prompt'))
   check('audit records failures', lines.some(line => line.ok === false))
+  // The trail has to be readable from the panel and from a peer, not only by ssh.
+  // The settings section moved the listener, so the module-level `url` is stale
+  // here; talk to whatever port is bound right now.
+  const liveAuditUrl = `http://127.0.0.1:${String(server.status.port)}`
+  const tailOf = async limit => {
+    const response = await fetch(`${liveAuditUrl}/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id: 'audit-tail', method: 'audit.tail', params: { limit } }),
+    })
+    return response.json()
+  }
+  const tail = await tailOf(5)
+  check('audit.tail returns the newest lines', Array.isArray(tail.result?.entries) && tail.result.entries.length === 5, JSON.stringify(tail).slice(0, 200))
+  check('audit.tail entries name the caller', tail.result.entries.every(entry => typeof entry.t === 'string'), JSON.stringify(tail.result.entries[0]).slice(0, 120))
+  const tailAll = await tailOf(500)
+  equal('audit.tail clamps a greedy limit', tailAll.result.entries.length <= 200, true)
+  const readTailTool = await tools.get('lan_dsh_audit').execute({ limit: 3 }, { signal: undefined })
+  equal('audit tool returns the requested window', readTailTool.entries.length, 3)
+  check('audit tool names this machine', typeof readTailTool.machine === 'string' && readTailTool.machine.length > 0, String(readTailTool.machine))
+  check('audit tool renders one line per entry',
+    String(readTailTool.message).split('\n').length === 4, String(readTailTool.message).slice(0, 120))
 }
 
 await ctx.dispose()

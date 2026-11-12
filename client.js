@@ -7,7 +7,11 @@
  * thrown render.
  *
  * Layout (top to bottom), each block one `.dslb-card` of the same column:
- *   1. `StatusHero`    — name, role pill, listener state line, copyable address
+ *   1. `StatusHero`    — name, role pill, listener state line, copyable address,
+ *                        and the optional build line (`Host 0.4.4`, a warn pill
+ *                        when the code on disk is newer, a quiet pill when the
+ *                        page itself came from another build). Every version
+ *                        field is optional; no block, no line.
  *   2. `ListenSettings`— the listener itself: name, bind address/port, plaintext
  *                        consent, mDNS switch, trusted hosts, TLS pair, sticky
  *                        save bar. Saving POSTs the whole settings set and
@@ -25,7 +29,16 @@
  *                        render checked and disabled instead of lying about it.
  *                        A Host that sends no `workspaces` key keeps the old
  *                        flat list.
- *   5. `Discovery`     — mDNS neighbours heard on the LAN (read-only)
+ *   5. `FilesSettings` — the peer-visible file roots: one switch, the per-file
+ *                        cap (typed in MiB, stored in bytes) and a root editor
+ *                        (name / local path / writable). Shares the sticky save
+ *                        bar with `ListenSettings`; a Host without a `files`
+ *                        block shows the off state.
+ *   6. `Discovery`     — mDNS neighbours heard on the LAN (read-only)
+ *   7. `Audit`         — the newest cross-machine calls (time, source peer,
+ *                        method, path, outcome), five at a time with an
+ *                        expand/collapse link. Hidden entirely when the Host
+ *                        sends no readable log.
  *
  * Every read goes through the Host's own cookie-authenticated route
  * (`api/lan-bridge.*` on the Web listener), never through the bridge
@@ -60,6 +73,13 @@ window.__ModuleLoader__.load({
 
     /** Section id: the Settings nav row, the icon match key, and this page. */
     const SECTION_ID = 'lan-bridge'
+
+    /**
+     * The panel build, kept in step with the released bundle. Compared with
+     * `state.version.running` only to warn that the page in front of you was
+     * loaded from an older bundle than the Host is serving.
+     */
+    const PANEL_VERSION = '0.4.4'
 
     const DICT = {
       zh: {
@@ -219,6 +239,15 @@ window.__ModuleLoader__.load({
         filesRootNameDuplicate: '根目录名称必须唯一。',
         filesRootPathMissing: '路径不能为空。',
         filesMaxInvalid: '单文件上限必须是 1 到 4096 之间的整数 MiB。',
+        versionHost: 'Host {version}',
+        versionDisk: '磁盘 {version} · 重启后生效',
+        versionPanel: '面板 {version}',
+        versionPanelHint: '面板比 Host 新或旧，⌘R 刷新页面即可。',
+        auditTitle: '审计',
+        auditHint: '每一次跨机调用都记在这里；文件与路径只写在本机。',
+        auditEmpty: '还没有跨机调用',
+        auditExpand: '展开全部 {count} 条',
+        auditCollapse: '收起',
         wsShareAll: '共享整个工作区',
         wsShareFailed: '工作区共享切换失败',
         wsExpandAll: '全部展开',
@@ -381,6 +410,15 @@ window.__ModuleLoader__.load({
         filesRootNameDuplicate: 'Root names must be unique.',
         filesRootPathMissing: 'The path cannot be empty.',
         filesMaxInvalid: 'Max file size must be an integer between 1 and 4096 MiB.',
+        versionHost: 'Host {version}',
+        versionDisk: 'Disk {version} · applies after restart',
+        versionPanel: 'Panel {version}',
+        versionPanelHint: 'This panel is older or newer than the Host; ⌘R reloads the page.',
+        auditTitle: 'Audit',
+        auditHint: 'Every cross-machine call lands here; files and paths are written on this machine only.',
+        auditEmpty: 'No cross-machine calls yet',
+        auditExpand: 'Show all {count}',
+        auditCollapse: 'Collapse',
         wsShareAll: 'Share the whole workspace',
         wsShareFailed: 'Workspace sharing failed',
         wsExpandAll: 'Expand all',
@@ -440,7 +478,7 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary,#5b6270);',
       'border:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));',
       'background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.08))}',
-      '.dslb-statusLine{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;line-height:18px;',
+      '.dslb-statusLine{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-label-secondary,#5b6270)}',
       '.dslb-statusText{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dslb-liveDot{flex:none;width:8px;height:8px;border-radius:50%;',
@@ -570,6 +608,28 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-primary,#1f2329)}',
       '.dslb-linkBtn:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
       'outline-offset:1px}',
+      // Indented by the dot plus its gap so a wrapped version strip still reads
+      // as part of the same status block instead of starting at the card edge.
+      '.dslb-lineMeta{display:flex;align-items:center;gap:6px;min-width:0;flex:none;flex-wrap:wrap;',
+      'padding-left:14px}',
+      '.dslb-version{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c);',
+      'white-space:nowrap}',
+      '.dslb-pill[data-tone="warn"]{background:var(--dsw-alias-state-warn-tertiary,#fef3c7);',
+      'border-color:transparent;color:var(--dsw-alias-state-warn-primary,#f59e0b)}',
+      '.dslb-pill[data-tone="quiet"]{color:var(--dsw-alias-label-tertiary,#81858c)}',
+      '.dslb-auditRow{display:grid;grid-template-columns:auto minmax(0,auto) minmax(0,1.1fr) minmax(0,1.4fr) auto;',
+      'gap:2px 10px;align-items:baseline;min-width:0;padding:8px 0;font-size:12px;line-height:18px}',
+      '.dslb-auditRow+.dslb-auditRow{border-top:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2))}',
+      '.dslb-auditTime{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+      'color:var(--dsw-alias-label-secondary,#5b6270);white-space:nowrap}',
+      '.dslb-auditPeer,.dslb-auditMethod,.dslb-auditPath{min-width:0;overflow:hidden;text-overflow:ellipsis;',
+      'white-space:nowrap}',
+      '.dslb-auditPeer{color:var(--dsw-alias-label-primary,#1f2329)}',
+      '.dslb-auditMethod{color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-auditPath{color:var(--dsw-alias-label-tertiary,#81858c)}',
+      '.dslb-auditOutcome{white-space:nowrap;color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-auditOutcome[data-tone="success"]{color:var(--dsw-alias-state-success-primary,#22c55e)}',
+      '.dslb-auditOutcome[data-tone="error"]{color:var(--dsw-alias-state-error-primary,#ec1313)}',
       '.dslb-cardPosture{margin:0;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-label-secondary,#5b6270);overflow-wrap:anywhere}',
       '.dslb-roots{display:flex;flex-direction:column;min-width:0}',
@@ -833,6 +893,40 @@ window.__ModuleLoader__.load({
         settings: normalizeSettings(root, listen),
         addresses: list(root.addresses).map((value) => text(value, '')).filter((value) => value !== ''),
         restartRequired: root.restartRequired === true,
+        // All three are optional: an older Host simply has no version block and
+        // the hero renders no version text rather than throwing.
+        version: (() => {
+          const block = record(root.version)
+          if (block === null) return { running: '', disk: '', drift: false }
+          return {
+            running: text(block.running, ''),
+            disk: text(block.disk, ''),
+            drift: block.drift === true,
+          }
+        })(),
+        // Absent or malformed audit data hides the card; it is never an error.
+        audit: (() => {
+          if (!Array.isArray(root.audit)) return null
+          const rows = []
+          for (const entry of root.audit) {
+            const item = record(entry)
+            if (item === null) continue
+            const method = text(item.method, '')
+            if (method === '') continue
+            rows.push({
+              t: text(item.t, ''),
+              peer: text(item.peer, ''),
+              method,
+              path: text(item.path, ''),
+              outcome: text(item.outcome, ''),
+              code: text(item.code, ''),
+            })
+          }
+          // A log we cannot read at all is treated like no log: the card stays
+          // out of the page instead of claiming nothing has happened.
+          if (rows.length === 0 && root.audit.length > 0) return null
+          return rows.slice(-20)
+        })(),
         discovery: {
           known: agent !== null,
           enabled: agent !== null && agent.enabled === true,
@@ -1326,7 +1420,28 @@ window.__ModuleLoader__.load({
               'aria-label': `${t('listen')}: ${line}`,
             },
               h('span', { className: 'dslb-liveDot', 'data-state': state, 'aria-hidden': 'true' }),
-              h('span', { className: 'dslb-statusText', title: line }, line))),
+              h('span', { className: 'dslb-statusText', title: line }, line),
+              // The version strip is optional end to end: no running version,
+              // no strip; a disk version that differs from the running one adds
+              // a warn pill saying a restart is what applies it.
+              data.version.running === ''
+                ? null
+                : h('span', { className: 'dslb-lineMeta' },
+                  h('span', { className: 'dslb-version' }, t('versionHost', { version: data.version.running })),
+                  data.version.drift === true && data.version.disk !== ''
+                    ? h('span', {
+                      className: 'dslb-pill',
+                      'data-tone': 'warn',
+                      title: t('versionDisk', { version: data.version.disk }),
+                    }, t('versionDisk', { version: data.version.disk }))
+                    : null,
+                  data.version.running !== PANEL_VERSION
+                    ? h('span', {
+                      className: 'dslb-pill',
+                      'data-tone': 'quiet',
+                      title: t('versionPanelHint'),
+                    }, t('versionPanel', { version: PANEL_VERSION }))
+                    : null))),
           h('div', { className: 'dslb-heroSide' },
             live === '' ? null : h('span', { className: 'dslb-addr', title: live }, live),
             h('button', {
@@ -1798,6 +1913,64 @@ window.__ModuleLoader__.load({
             title: canSave ? undefined : t('settingsSaveBlocked'),
             onClick: save,
           }, saving ? t('settingsSaving') : t('settingsSave'))))
+    }
+
+    /** HH:MM:SS in the viewer's own timezone; the raw string if unparsable. */
+    function auditTime(value) {
+      const date = new Date(value)
+      if (!Number.isFinite(date.getTime())) return value
+      const pad = (part) => String(part).padStart(2, '0')
+      return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+    }
+
+    /** Keep the file name visible when a path is too long for one column. */
+    function shortPath(value, limit) {
+      if (value.length <= limit) return value
+      const cut = value.lastIndexOf('/')
+      const tail = cut === -1 ? value.slice(value.length - (limit - 1)) : value.slice(cut)
+      const head = value.slice(0, Math.max(0, limit - tail.length - 1))
+      return `${head}…${tail}`
+    }
+
+    /** One audit line: time, source peer, method, path (if any) and outcome. */
+    function Audit(props) {
+      const { data, t } = props
+      const [open, setOpen] = React.useState(false)
+      if (data.audit === null) return null
+      // The Host stores oldest first; the newest line is the one operators want.
+      const entries = data.audit.slice().reverse()
+      const shown = open ? entries : entries.slice(0, 5)
+      return h(Card, {
+        title: t('auditTitle'),
+        hint: t('auditHint'),
+        actions: entries.length <= 5
+          ? null
+          : h('button', {
+            type: 'button',
+            className: 'dslb-linkBtn',
+            'aria-expanded': open ? 'true' : 'false',
+            onClick: () => setOpen(!open),
+          }, open ? t('auditCollapse') : t('auditExpand', { count: entries.length })),
+      },
+      entries.length === 0
+        ? h(Empty, { title: t('auditEmpty'), next: null })
+        : h('div', { className: 'dslb-list' }, shown.map((entry, index) => {
+          const failed = entry.code.indexOf('bridge/') === 0
+          const tone = failed ? 'error' : (entry.outcome === 'ok' ? 'success' : 'quiet')
+          // A refusal often reports the same string as both outcome and code;
+          // do not print it twice.
+          const result = entry.code === '' || entry.code === entry.outcome
+            ? entry.outcome
+            : `${entry.outcome} · ${entry.code}`
+          return h('div', { className: 'dslb-auditRow', key: `audit-${index}` },
+            h('span', { className: 'dslb-auditTime' }, auditTime(entry.t)),
+            h('span', { className: 'dslb-auditPeer', title: entry.peer }, entry.peer === '' ? t('empty') : entry.peer),
+            h('span', { className: 'dslb-auditMethod', title: entry.method }, entry.method),
+            entry.path === ''
+              ? h('span', { className: 'dslb-auditPath', 'aria-hidden': 'true' }, '')
+              : h('span', { className: 'dslb-auditPath', title: entry.path }, shortPath(entry.path, 40)),
+            h('span', { className: 'dslb-auditOutcome', 'data-tone': tone }, result))
+        })))
     }
 
     /**
@@ -2611,7 +2784,8 @@ window.__ModuleLoader__.load({
           onToggleOpen: toggleOpen,
           onToggleAll: toggleAll,
         }),
-        h(Discovery, { data, t }))
+        h(Discovery, { data, t }),
+        h(Audit, { data, t }))
     }
 
     /**

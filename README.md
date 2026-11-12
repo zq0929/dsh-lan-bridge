@@ -36,7 +36,7 @@
 # 2) 在 DSH 里用插件管理器安装这个目录（绝对路径）
 #    plugin_manager action=install_bundle target=/绝对路径/dsh-lan-bridge
 # 3) 重启 DSH（桌面版退出重开），插件按 cordis.patch.yml 的默认配置挂载：
-#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 12 个工具 + 面板 + 可选 mDNS
+#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 18 个工具 + 面板 + 可选 mDNS
 ```
 
 装完在 Web UI 里应该能看到「局域网桥」面板（会话共享开关 / peer 列表 / 配对）。
@@ -164,6 +164,9 @@
 | `lan_dsh_push_file` | 把一个本地文件推到 peer 的某个共享根下（分块 + sha256 校验；需要该 token 带 `files`，且目标根可写） |
 | `lan_dsh_pull_file` | 从 peer 的共享根拉一个文件到本机（先写临时文件，校验通过才改名） |
 | `lan_dsh_files` | 只读探查对端：`roots`（共享了哪些根、是否可写）/ `list` / `stat` |
+| `lan_dsh_push_files` | 一次推多个文件（逐文件独立传输，单个失败不影响其余，返回汇总与每条结果） |
+| `lan_dsh_pull_files` | 一次拉多个文件（同上） |
+| `lan_dsh_audit` | 读审计尾迹：省略 peer 读本机（对端在我这里做过什么），`peer=` 读对方；`limit` 1–200 |
 
 ## 安全模型（请照着读一遍）
 
@@ -325,6 +328,12 @@ discovered over mDNS:
 **广播里没有令牌，也授不了权。** mDNS 只回答"它在哪"，"谁能驱动它"仍然由对端面板签发的 bearer token 决定，会话仍要靠 `share` 逐个点开。这是刻意的分层：网络可以知道你的地址，但只有你能决定谁可以动手。发现只是省了问 IP 这一步，配对还是要人工做一次。
 
 端口广播的是**实际绑定端口**（配置写 `port: 0` 时也不会广播 0）；多网卡只广播第一个非回环 IPv4。
+
+## 三个「看得见」的东西（0.4.4 起）
+
+- **版本漂移**：Host 只在启动时加载插件代码，`git pull` / 升级只改磁盘。面板状态卡显示 `Host x.y.z`，磁盘比它新时多一个「磁盘 x.y.z · 重启后生效」的警示胶囊；`bridge.hello` 同时给 `version` 与 `diskVersion`。面板自己也有版本号，比 Host 新或旧时提示 ⌘R 刷新。
+- **审计**：`lan_dsh_audit { limit: 20 }` 读本机尾迹（对端在我这里做过什么），`{ peer: "windows" }` 读对方的；面板最后一张卡直接列出最近 20 行，可展开。文件与路径只写在**执行那一侧**的 `audit.jsonl`。
+- **批量传输**：`lan_dsh_push_files` / `lan_dsh_pull_files` 一次给一组 `{localPath, remotePath}`，逐文件独立走 begin/chunk/commit，单文件失败不中断其余，返回 `{sent, failed, results[]}`。不是目录递归——要整棵树请先打包。
 
 ## 已知限制
 

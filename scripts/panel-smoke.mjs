@@ -1513,6 +1513,112 @@ async function scenario_pair_files_unchecked() {
   results.push('the pair dialog offers files but never grants it by default')
 }
 
+async function scenario_version_drift() {
+  reset(async () => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    body: withState({ version: { running: '0.4.1', disk: '0.4.5', drift: true } }),
+  }))
+  mount()
+  await settle()
+  const text = textOf(rendered)
+  assert(text.includes('Host 0.4.1'), 'version: the running version is on the status line')
+  assert(text.includes('磁盘 0.4.5'), 'version: the disk version is named')
+  assert(text.includes('重启后生效'), 'version: drift says a restart is what applies it')
+  assert(text.includes('面板 0.4.4'), 'version: a panel/Host mismatch is named')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'version: drift is a warning, never an error bar')
+  const warn = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-pill')
+    && node.props['data-tone'] === 'warn')
+  assert(warn.length === 1, 'version: exactly one warn pill')
+  results.push('a code/disk version drift is a warn pill on the status line, not an error')
+}
+
+async function scenario_version_missing() {
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: LIVE_STATE }))
+  mount()
+  await settle()
+  const text = textOf(rendered)
+  assert(text.includes('qian-mbp'), 'version missing: the panel still renders')
+  assert(text.includes('Host 0.') === false, 'version missing: no version text is invented')
+  assert(findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-version')).length === 0,
+    'version missing: no version strip')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'version missing: an absent block is not an error')
+  results.push('a Host without a version block renders no version strip and no alert')
+}
+
+async function scenario_audit_card() {
+  const audit = [
+    { t: '2026-11-12T08:00:00.000Z', peer: 'windows', method: 'session.list', outcome: 'ok' },
+    { t: '2026-11-12T08:30:00.000Z', peer: 'windows', method: 'session.prompt', path: '/Users/qian/Documents/deepseek-harness/default-workspace/a.txt', outcome: 'ok' },
+    { t: '2026-11-12T09:03:11.000Z', peer: 'linux-box', method: 'file.write', path: '/srv/shared/secret.bin', outcome: 'refused', code: 'bridge/forbidden' },
+  ]
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: withState({ audit }) }))
+  mount()
+  await settle()
+  const text = textOf(rendered)
+  assert(text.includes('审计'), 'audit: the card is present')
+  assert(text.includes('每一次跨机调用都记在这里；文件与路径只写在本机。'), 'audit: the card explains itself')
+  const rows = byClass(rendered, 'dslb-auditRow')
+  assert(rows.length === 3, `audit: one row per entry (got ${rows.length})`)
+  assert(text.includes('session.prompt'), 'audit: the method is shown')
+  assert(text.includes('bridge/forbidden'), 'audit: the refusal code is shown')
+  assert(text.includes('a.txt'), 'audit: the file name survives the truncation')
+  const first = textOf([rows[0]])
+  assert(first.includes('file.write'), 'audit: the newest entry is rendered first')
+  const erred = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-auditOutcome')
+    && node.props['data-tone'] === 'error')
+  assert(erred.length === 1, 'audit: a bridge/* code is coloured as an error')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'audit: the audit card is not an error bar')
+  // An empty list is an explained empty state, not a missing card.
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: withState({ audit: [] }) }))
+  mount()
+  await settle()
+  assert(textOf(rendered).includes('还没有跨机调用'), 'audit: an empty log says so')
+  assert(byClass(rendered, 'dslb-auditRow').length === 0, 'audit: no rows when the log is empty')
+  // A Host without the key hides the card entirely.
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: LIVE_STATE }))
+  mount()
+  await settle()
+  assert(textOf(rendered).includes('审计') === false, 'audit: an older Host renders no audit card')
+  // An unreadable log is not "nothing happened": the card hides instead of lying.
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: withState({ audit: [null, 42, { method: '' }] }) }))
+  mount()
+  await settle()
+  assert(textOf(rendered).includes('审计') === false, 'audit: an unreadable log hides the card')
+  assert(textOf(rendered).includes('还没有跨机调用') === false, 'audit: an unreadable log is not reported as empty')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'audit: malformed rows are not an error bar')
+  results.push('the audit card lists newest-first rows, colours refusals red and explains an empty log')
+}
+
+async function scenario_audit_collapse() {
+  const audit = []
+  for (let index = 0; index < 7; index += 1) {
+    audit.push({
+      t: `2026-11-12T08:0${index}:00.000Z`,
+      peer: 'windows',
+      method: `fs.op${index}`,
+      outcome: 'ok',
+    })
+  }
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: withState({ audit }) }))
+  mount()
+  await settle()
+  assert(byClass(rendered, 'dslb-auditRow').length === 5, 'audit collapse: the newest five rows are shown first')
+  const expand = clickable(rendered, '展开全部 7 条')
+  assert(expand !== null, 'audit collapse: the expand link counts every entry')
+  expand.props.onClick()
+  await settle()
+  assert(byClass(rendered, 'dslb-auditRow').length === 7, 'audit collapse: expanding shows every row')
+  const collapse = clickable(rendered, '收起')
+  assert(collapse !== null, 'audit collapse: a collapse control appears')
+  collapse.props.onClick()
+  await settle()
+  assert(byClass(rendered, 'dslb-auditRow').length === 5, 'audit collapse: collapsing returns to five rows')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'audit collapse: expanding is not an error')
+  results.push('the audit log shows five rows by default and expands or collapses on demand')
+}
+
 const scenarios = [
   scenario_host_older_than_panel,
   scenario_loading,
@@ -1551,6 +1657,10 @@ const scenarios = [
   scenario_files_row_layout,
   scenario_files_missing,
   scenario_pair_files_unchecked,
+  scenario_version_drift,
+  scenario_version_missing,
+  scenario_audit_card,
+  scenario_audit_collapse,
 ]
 
 let failed = 0
