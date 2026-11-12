@@ -246,6 +246,25 @@ function sharingSwitches(nodes) {
     && node.props['aria-label'] === '共享给对等端')
 }
 
+/** The workspace-level switches; the per-session ones keep their own label. */
+function wsSwitches(nodes) {
+  return findAll(nodes, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
+    && node.props['aria-label'] === '共享整个工作区')
+}
+
+/** The chevron/expand buttons, one per rendered workspace group. */
+function wsToggles(nodes) {
+  return findAll(nodes, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-wsToggle'))
+}
+
+/** Workspaces start collapsed, so most session assertions expand the first one. */
+async function expandFirstWorkspace() {
+  const toggle = wsToggles(rendered)[0]
+  assert(toggle !== undefined, 'expand: a workspace toggle is rendered')
+  toggle.props.onClick()
+  await settle()
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(`ASSERT: ${message}`)
 }
@@ -430,6 +449,20 @@ const STATE = {
     { sessionId: 's1', title: '重构命令面板', running: true, cwd: '/home/dev/panel', shared: true },
     { sessionId: 's2', title: '写周报', running: false, cwd: '/home/dev/docs', shared: false },
   ],
+  workspaces: [
+    {
+      workspaceId: 'w-panel',
+      title: 'panel-project',
+      path: '/home/dev/panel',
+      shared: false,
+      sessions: [
+        { sessionId: 's1', title: '重构命令面板', running: true, cwd: '/home/dev/panel', shared: true },
+        { sessionId: 's2', title: '写周报', running: false, cwd: '/home/dev/docs', shared: false },
+      ],
+    },
+    { workspaceId: 'w-docs', title: 'docs-site', path: '/home/dev/docs', shared: false, sessions: [] },
+    { workspaceId: 'ungrouped', title: '', path: '', shared: false, sessions: [] },
+  ],
 }
 
 function mount(props) {
@@ -467,24 +500,29 @@ async function scenario_ready() {
   const text = textOf(rendered)
   for (const expected of [
     '本机', '双向', 'qian-mbp', '0.0.0.0:5799',
-    '会话', '重构命令面板', '运行中', '写周报', '空闲', '/home/dev/panel',
+    '会话', 'panel-project', '/home/dev/panel', '2 个会话 · 1 已共享', 'docs-site', '0 个会话',
+    '全部展开',
     '对等端', '入站', 'study-nuc', 'lzb_…4f2a', '出站', 'work-mac', 'http://192.168.1.8:5799', '可达', '不可达',
     '配对新对等端',
   ]) {
     assert(text.includes(expected), `ready: missing ${expected}`)
   }
   assert(calls.some((call) => call.url === 'http://127.0.0.1:56997/api/lan-bridge.state'), 'ready: reads the Host route')
-  const switches = sharingSwitches(rendered)
-  assert(switches.length === 2, `ready: two sharing switches, got ${switches.length}`)
-  assert(switches[0].props['aria-checked'] === 'true', 'ready: shared session switch is on')
-  assert(switches[1].props['aria-checked'] === 'false', 'ready: unshared session switch is off')
-  assert(switches[0].props.disabled !== true, 'ready: switch enabled')
+  // Sessions are collapsed by default: only the workspace rows are visible.
+  const toggles = wsToggles(rendered)
+  assert(toggles.length === 2, `ready: two workspace rows, got ${toggles.length}`)
+  assert(toggles.every((node) => node.props['aria-expanded'] === 'false'), 'ready: workspaces start collapsed')
+  assert(sharingSwitches(rendered).length === 0, 'ready: no session switches while collapsed')
+  assert(!text.includes('重构命令面板'), 'ready: collapsed groups hide their sessions')
+  const workspaceSwitches = wsSwitches(rendered)
+  assert(workspaceSwitches.length === 2, `ready: one switch per workspace, got ${workspaceSwitches.length}`)
+  assert(workspaceSwitches.every((node) => node.props.role === 'switch'), 'ready: workspace switch is a switch')
   const permission = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
     && node.props['aria-label'] === '允许对端新建会话')
   assert(permission.length === 1, 'ready: the create-sessions permission is its own switch')
   assert(permission[0].props['aria-checked'] === 'true', 'ready: create-sessions defaults on')
-  assert(byClass(rendered, 'dslb-dot').length === 4, 'ready: two session dots + two peer dots')
-  results.push('ready state renders all three sections')
+  assert(byClass(rendered, 'dslb-dot').length === 2, 'ready: the two peer dots only, sessions collapsed')
+  results.push('ready state renders the workspace hierarchy collapsed, plus peers')
 }
 
 async function scenario_toggle_success() {
@@ -497,7 +535,12 @@ async function scenario_toggle_success() {
   }
   mount()
   await settle()
+  await expandFirstWorkspace()
   const switches = sharingSwitches(rendered)
+  assert(switches.length === 2, `toggle: both session switches after expanding, got ${switches.length}`)
+  assert(switches[0].props['aria-checked'] === 'true', 'toggle: shared session switch is on')
+  assert(switches[1].props['aria-checked'] === 'false', 'toggle: unshared session switch is off')
+  assert(switches[0].props.disabled !== true, 'toggle: switch enabled')
   switches[1].props.onClick()
   // Optimistic: the switch flips before the route answers.
   dirty = false
@@ -526,6 +569,7 @@ async function scenario_toggle_failure() {
   }
   mount()
   await settle()
+  await expandFirstWorkspace()
   sharingSwitches(rendered)[1].props.onClick()
   await settle()
   const switches = sharingSwitches(rendered)
@@ -607,6 +651,129 @@ async function scenario_pair() {
   results.push('pairing shows a one-time token and forgets it on dismiss')
 }
 
+async function scenario_expand_workspace() {
+  hookStore.clear()
+  instances.clear()
+  calls.length = 0
+  handler = async () => ({ ok: true, status: 200, statusText: 'OK', body: STATE })
+  mount()
+  await settle()
+  await expandFirstWorkspace()
+  assert(wsToggles(rendered)[0].props['aria-expanded'] === 'true', 'expand: aria-expanded flips to true')
+  const text = textOf(rendered)
+  for (const expected of ['重构命令面板', '运行中', '写周报', '空闲', '/home/dev/panel', '/home/dev/docs']) {
+    assert(text.includes(expected), `expand: missing ${expected}`)
+  }
+  assert(sharingSwitches(rendered).length === 2, 'expand: the group’s session switches appear')
+  assert(byClass(rendered, 'dslb-dot').length === 4, 'expand: two peer dots + two session dots')
+  // Collapsing puts the rows away again without losing the group.
+  wsToggles(rendered)[0].props.onClick()
+  await settle()
+  assert(wsToggles(rendered)[0].props['aria-expanded'] === 'false', 'expand: aria-expanded flips back')
+  assert(sharingSwitches(rendered).length === 0, 'expand: rows are hidden again')
+  // The card head expands and collapses every group at once.
+  clickable(rendered, '全部展开').props.onClick()
+  await settle()
+  assert(wsToggles(rendered).every((node) => node.props['aria-expanded'] === 'true'), 'expand: expand-all opens every group')
+  assert(textOf(rendered).includes('暂无会话'), 'expand: the empty workspace explains itself')
+  assert(textOf(rendered).includes('共享此工作区后，新建会话将自动共享'), 'expand: the empty workspace offers the next step')
+  clickable(rendered, '全部收起').props.onClick()
+  await settle()
+  assert(wsToggles(rendered).every((node) => node.props['aria-expanded'] === 'false'), 'expand: collapse-all closes every group')
+  results.push('workspaces start collapsed, expand individually and all at once')
+}
+
+/** A Host answer where the workspace rule is in force, as the real one would reply. */
+function withWorkspaceShared(workspaceId) {
+  const share = (session) => ({ ...session, shared: true })
+  return {
+    ...STATE,
+    sessions: STATE.sessions.map(share),
+    workspaces: STATE.workspaces.map((group) => (group.workspaceId === workspaceId
+      ? { ...group, shared: true, sessions: group.sessions.map(share) }
+      : group)),
+  }
+}
+
+async function scenario_share_whole_workspace() {
+  // The first read is the state before the rule; every later read is how a Host
+  // that applied the rule would answer.
+  let writes0 = 0
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.shareWorkspace')) {
+      writes0 += 1
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, workspaceId: 'w-panel', shared: true } }
+    }
+    const body = writes0 === 0 ? STATE : withWorkspaceShared('w-panel')
+    return { ok: true, status: 200, statusText: 'OK', body }
+  })
+  mount()
+  await settle()
+  const switches = wsSwitches(rendered)
+  assert(switches.length === 2, 'whole: one switch per workspace')
+  assert(switches[0].props['aria-checked'] === 'false', 'whole: the workspace starts unshared')
+  switches[0].props.onClick()
+  dirty = false
+  rendered = renderRoot(currentElement)
+  runEffects()
+  assert(wsSwitches(rendered)[0].props['aria-checked'] === 'true', 'whole: optimistic flip')
+  await settle()
+  const writes = calls.filter((call) => call.url.endsWith('/api/lan-bridge.shareWorkspace'))
+  assert(writes.length === 1, 'whole: one workspace call')
+  assert(writes[0].method === 'POST', 'whole: POST')
+  assert(writes[0].body.workspaceId === 'w-panel', 'whole: workspaceId in body')
+  assert(writes[0].body.shared === true, 'whole: shared in body')
+  assert(calls.filter((call) => call.url.endsWith('/api/lan-bridge.state')).length >= 2, 'whole: the fresh read is applied')
+  await expandFirstWorkspace()
+  const text = textOf(rendered)
+  assert(text.includes('工作区已整体共享，新会话自动共享'), 'whole: the rule is explained in the group')
+  const rowSwitches = sharingSwitches(rendered)
+  assert(rowSwitches.length === 2, 'whole: the sessions are still listed')
+  assert(rowSwitches.every((node) => node.props['aria-checked'] === 'true'), 'whole: effective sharing is shown')
+  assert(rowSwitches.every((node) => node.props.disabled === true), 'whole: per-session switches are locked')
+  results.push('sharing a whole workspace posts {workspaceId, shared} and locks its sessions')
+}
+
+async function scenario_share_workspace_failure() {
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.shareWorkspace')) {
+      return {
+        ok: false,
+        status: 200,
+        statusText: 'OK',
+        body: { ok: false, error: { code: 'bridge/bad-request', message: 'unknown workspace', details: { workspaceId: 'w-panel' } } },
+      }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: STATE }
+  })
+  mount()
+  await settle()
+  wsSwitches(rendered)[0].props.onClick()
+  await settle()
+  assert(wsSwitches(rendered)[0].props['aria-checked'] === 'false', 'whole failure: switch reverted')
+  const text = textOf(rendered)
+  assert(text.includes('工作区共享切换失败'), 'whole failure: the group explains the revert')
+  assert(text.includes('unknown workspace'), 'whole failure: the Host sentence surfaces')
+  results.push('a refused workspace toggle reverts and shows the Host sentence')
+}
+
+async function scenario_no_workspaces_key() {
+  const { workspaces, ...flat } = STATE
+  assert(workspaces !== undefined, 'fallback: the fixture really carries workspaces')
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: flat }))
+  mount()
+  await settle()
+  const text = textOf(rendered)
+  assert(wsToggles(rendered).length === 0, 'fallback: no workspace rows without the key')
+  assert(sharingSwitches(rendered).length === 2, 'fallback: the flat session list renders')
+  assert(byClass(rendered, 'dslb-dot').length === 4, 'fallback: flat sessions keep their dots')
+  for (const expected of ['重构命令面板', '写周报', '运行中', '空闲', '/home/dev/panel']) {
+    assert(text.includes(expected), `fallback: missing ${expected}`)
+  }
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'fallback: an older Host is not an error')
+  results.push('a Host without workspaces falls back to the flat session list')
+}
+
 async function scenario_malformed() {
   hookStore.clear()
   instances.clear()
@@ -668,7 +835,8 @@ async function scenario_stale_after_error() {
   assert(retry !== null, 'stale: retry offered')
   retry.props.onClick()
   await settle()
-  assert(textOf(rendered).includes('重构命令面板'), 'stale: retry recovers')
+  assert(textOf(rendered).includes('panel-project'), 'stale: retry recovers the workspace rows')
+  assert(wsToggles(rendered).length === 2, 'stale: the recovered state is fully rendered')
   results.push('retry recovers after a failed read')
 }
 
@@ -1175,6 +1343,10 @@ const scenarios = [
   scenario_ready,
   scenario_toggle_success,
   scenario_toggle_failure,
+  scenario_expand_workspace,
+  scenario_share_whole_workspace,
+  scenario_share_workspace_failure,
+  scenario_no_workspaces_key,
   scenario_revoke,
   scenario_pair,
   scenario_malformed,

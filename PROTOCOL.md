@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.6", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.12", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -274,14 +274,20 @@ them. Prefix `/api/lan-bridge`.
 {
   "role": "both", "name": "my-mac",
   "listen": { "host": "127.0.0.1", "port": 5977, "protocol": "http", "listening": true, "error": null },
-  "capabilities": ["read", "prompt", "control", "create", "archive"],
+  "capabilities": ["read", "prompt", "control", "create", "archive", "collab"],
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
               "rateLimitPerMinute": 120, "allowPeersToCreateSessions": false },
   "inbound": [ { "name": "peer-a", "masked": "…a1b2", "createdAt": 1762…, "lastSeenAt": 1762…,
                  "capabilities": ["read", "prompt"] } ],
   "outbound": [ { "name": "peer-b", "url": "http://192.168.1.8:5977", "reachable": true,
                   "addedAt": 1762…, "error": null } ],
-  "sessions": [ { "sessionId": "…", "title": "…", "running": false, "cwd": "…", "shared": true } ],
+  "sessions": [ { "sessionId": "…", "title": "…", "running": false, "updatedAt": 1762…, "cwd": "…", "shared": true } ],
+  "workspaces": [
+    { "workspaceId": "w-panel", "title": "panel-project", "path": "/home/dev/panel", "shared": true,
+      "sessions": [ { "sessionId": "…", "title": "…", "running": false, "updatedAt": 1762…, "cwd": "…", "shared": true } ] },
+    { "workspaceId": "w-docs", "title": "docs-site", "path": "/home/dev/docs", "shared": false, "sessions": [] },
+    { "workspaceId": "ungrouped", "title": "Other sessions", "path": "", "shared": false, "sessions": [] }
+  ],
   "settings": { "name": "my-mac", "host": "127.0.0.1", "port": 5977, "insecureHttp": false,
                 "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
                 "tls": null, "discovery": true },
@@ -306,7 +312,34 @@ and `listen.port` carries the port the OS assigned). `addresses` lists this mach
 interface literals so the panel can offer them. `restartRequired` is reserved: every
 setting in `settings` currently applies without a Host restart.
 
+`workspaces` is the grouped view of `sessions` (added in 0.3.12, so it is additive too —
+a panel that does not see this key falls back to the flat `sessions` list). A group is
+built from `ctx.workspaceRegistry.list()` when the Host has one; a session whose cwd is
+not claimed by any registered workspace gets a synthetic group keyed by that cwd (id
+`path:<cwd>`, title = basename), and a session with no cwd lands in `ungrouped` (always
+last). Workspaces with zero sessions are still listed so the operator can share them
+before creating anything. Groups are ordered by their newest session's `updatedAt`.
+`group.shared` is the rule state; `session.shared` inside a group is the **effective**
+value (its own decision OR the whole-workspace rule). Matching a session to a workspace
+is **exact cwd equality**, not a path prefix — the same rule DSH's own
+`WorkspaceEntity.sessionIds` uses. On Hosts without a workspace registry the cwd-synthetic
+groups still work, so the panel behaves the same everywhere.
+
 ### `POST /api/lan-bridge.share` → `{ "sessionId": "…", "shared": true }` → `{ "ok": true }`
+
+### `POST /api/lan-bridge.shareWorkspace` → `{ "workspaceId": "…", "shared": true }` → `{ "ok": true }`
+
+Shares (or unshares) an entire workspace at once. Turning a rule on **materializes** it:
+every session currently in the group is written into the same `shares` map that
+`POST /api/lan-bridge.share` and `session.list`/SSE already read, and any session created
+later in that cwd is added to it automatically (the Host subscribes to
+`api-session/added`). Only decisions the rule itself made are tracked in `autoShares`;
+turning the rule off removes exactly those, and **never revokes a session the operator
+shared by hand**. A manual `POST /api/lan-bridge.share` clears a session's auto marker, so
+the human decision always wins. An unknown `workspaceId` (or a missing one) is refused
+with `bridge/bad-request` and `details.workspaceId`. The reply is `{ "ok": true,
+"workspaceId": "…", "shared": true }`; a refused mutation uses the panel's
+`{ "ok": false, "error": { code, message, details } }` shape instead of throwing.
 
 ### `POST /api/lan-bridge.pair` → `{ "name": "peer-a", "capabilities": ["read","prompt"] }`
 

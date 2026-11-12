@@ -83,7 +83,7 @@ async function seed() {
   const doc = { version: 1, settings, inbound: {
     'e2e-full': entry(token, ['read', 'prompt', 'control', 'create', 'archive']),
     'e2e-read': entry(readToken, ['read']),
-  }, outbound: {}, shares: {} }
+  }, outbound: {}, shares: {}, workspaceShares: {}, autoShares: {} }
   await writeFile(STATE, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 })
 }
 async function wipe() {
@@ -97,6 +97,8 @@ async function wipe() {
       inbound: original.inbound ?? {},
       outbound: original.outbound ?? {},
       shares: original.shares ?? {},
+      workspaceShares: original.workspaceShares,
+      autoShares: original.autoShares,
       board: original.board,
       intents: original.intents,
     }, null, 2) + '\n',

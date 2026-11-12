@@ -16,8 +16,15 @@
  *                        in the same paint. No optimistic write, no re-read.
  *   3. `Peers`         — inbound / outbound sub-cards plus `Pairing` (a one-time
  *                        token, shown once, never persisted here)
- *   4. `Sessions`      — the sharing switches: the panel's main decision
- *                        surface, optimistic with a revert on refusal
+ *   4. `Sessions`      — the panel's main decision surface: one collapsible row
+ *                        per workspace (`WorkspaceGroup`, closed by default, a
+ *                        switch that shares the whole workspace) over indented
+ *                        per-session switches. Both levels are optimistic and
+ *                        revert on refusal. A workspace rule makes the sessions
+ *                        under it effectively shared, so their own switches
+ *                        render checked and disabled instead of lying about it.
+ *                        A Host that sends no `workspaces` key keeps the old
+ *                        flat list.
  *   5. `Discovery`     — mDNS neighbours heard on the LAN (read-only)
  *
  * Every read goes through the Host's own cookie-authenticated route
@@ -36,7 +43,9 @@
  * focus ring takes its width from `--dsw-focus-ring-width` but its colour from
  * `--dsw-alias-brand-primary`, because `--dsw-focus-ring-color` resolves to
  * `transparent` in the base theme; and `#fff` appears only as the fallback for
- * `--dsw-alias-label-primary-foreground`, never as a surface. Dark mode holds
+ * `--dsw-alias-label-primary-foreground`, never as a surface, and the one
+ * literal `#fff` switch knob is a shape on a tinted track (the on-state knob
+ * has to flip with the theme because the brand fill does). Dark mode holds
  * because every surface, border and label is a token.
  */
 
@@ -176,6 +185,19 @@ window.__ModuleLoader__.load({
         noDiscoveryNext: '在同一网段里打开上面监听设置中的「局域网发现（mDNS）」，其它同样打开的机器就会自动出现在这里。',
         discoveryFoundHint: '同一网段里广播自身的机器；令牌从不广播，配对仍需手动。',
         discoveryError: '发现失败：{message}',
+        wsExpand: '展开工作区',
+        wsCollapse: '收起工作区',
+        wsSessions: '{count} 个会话',
+        wsSharedCount: '{count} 已共享',
+        wsWholeShared: '工作区已整体共享，新会话自动共享',
+        wsShareHint: '共享整个工作区后，其中的会话不必逐个勾选。',
+        wsEmpty: '暂无会话',
+        wsEmptyNext: '共享此工作区后，新建会话将自动共享。',
+        wsOther: '其他会话',
+        wsShareAll: '共享整个工作区',
+        wsShareFailed: '工作区共享切换失败',
+        wsExpandAll: '全部展开',
+        wsCollapseAll: '全部收起',
       },
       en: {
         nav: 'LAN bridge',
@@ -300,6 +322,19 @@ window.__ModuleLoader__.load({
         noDiscoveryNext: 'Turn on “LAN discovery (mDNS)” in the listener settings above; machines in the same subnet that also have it on appear here automatically.',
         discoveryFoundHint: 'Machines announcing themselves in this subnet; tokens are never broadcast, so pairing stays manual.',
         discoveryError: 'Discovery failed: {message}',
+        wsExpand: 'Expand workspace',
+        wsCollapse: 'Collapse workspace',
+        wsSessions: '{count} sessions',
+        wsSharedCount: '{count} shared',
+        wsWholeShared: 'The whole workspace is shared; new sessions are shared automatically',
+        wsShareHint: 'Sharing a workspace covers every session in it; no per-session switch needed.',
+        wsEmpty: 'No sessions yet',
+        wsEmptyNext: 'Share this workspace and new sessions in it are shared automatically.',
+        wsOther: 'Other sessions',
+        wsShareAll: 'Share the whole workspace',
+        wsShareFailed: 'Workspace sharing failed',
+        wsExpandAll: 'Expand all',
+        wsCollapseAll: 'Collapse all',
       },
     }
 
@@ -307,6 +342,7 @@ window.__ModuleLoader__.load({
     const ROUTE = {
       state: 'api/lan-bridge.state',
       share: 'api/lan-bridge.share',
+      shareWorkspace: 'api/lan-bridge.shareWorkspace',
       pair: 'api/lan-bridge.pair',
       revoke: 'api/lan-bridge.revoke',
       settings: 'api/lan-bridge.settings',
@@ -395,6 +431,10 @@ window.__ModuleLoader__.load({
       '.dslb-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;',
       'background:var(--dsw-alias-label-primary-foreground,#fff);',
       'box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .12s ease}',
+      // Off: a light knob on the tinted track in both themes. The on-state knob
+      // follows the brand fill, which is near-black in light and near-white in
+      // dark, so it has to flip with the theme instead.
+      '.dslb-switch[aria-checked="false"]::after{background:#fff}',
       '.dslb-switch[aria-checked="true"]::after{transform:translateX(16px)}',
       '.dslb-switch:disabled{cursor:default;opacity:.6}',
       '.dslb-switch:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
@@ -445,6 +485,41 @@ window.__ModuleLoader__.load({
       '.dslb-toggleRow{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;',
       'min-height:44px;padding:6px 0;min-width:0}',
       '.dslb-toggleRow+.dslb-toggleRow{border-top:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3))}',
+
+      /* ---------- workspace groups: one collapsible row per workspace ---------- */
+      '.dslb-wsGroup{display:flex;flex-direction:column;min-width:0}',
+      '.dslb-wsGroup+.dslb-wsGroup{border-top:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2))}',
+      '.dslb-wsHead{display:flex;align-items:center;gap:8px;box-sizing:border-box;min-height:44px;min-width:0}',
+      '.dslb-wsToggle{display:flex;align-items:flex-start;gap:8px;flex:1 1 auto;min-width:0;min-height:44px;',
+      'box-sizing:border-box;padding:9px 6px 8px;border:0;border-radius:var(--dsw-radius-lg,8px);background:none;',
+      'color:inherit;font:inherit;text-align:left;cursor:pointer}',
+      '.dslb-wsToggle:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
+      '.dslb-wsToggle:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
+      'outline-offset:1px}',
+      '.dslb-chevron{flex:none;margin-top:7px;width:0;height:0;border-left:5px solid currentColor;',
+      'border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .12s ease}',
+      '.dslb-chevron[data-open="1"]{transform:rotate(90deg)}',
+      '.dslb-wsIdentity{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}',
+      '.dslb-wsTitleLine{display:flex;align-items:baseline;gap:8px;min-width:0}',
+      '.dslb-wsTitle{font-size:14px;line-height:20px;font-weight:500;color:var(--dsw-alias-label-primary,#1f2329);',
+      'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dslb-wsPath{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-secondary,#5b6270);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dslb-wsMeta{flex:none;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+      '.dslb-wsHint{margin:0 0 4px;padding-left:22px;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+      '.dslb-wsBody{display:flex;flex-direction:column;padding:0 0 4px 22px;min-width:0}',
+      '.dslb-wsBody>.dslb-row+.dslb-row{border-top:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));',
+      'border-radius:0}',
+      '.dslb-wsBody>.dslb-empty{padding:4px 0 2px}',
+      '.dslb-linkBtn{box-sizing:border-box;padding:2px 6px;border:0;border-radius:var(--dsw-radius-sm,6px);',
+      'background:none;color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:12px;line-height:18px;',
+      'cursor:pointer}',
+      '.dslb-linkBtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1));',
+      'color:var(--dsw-alias-label-primary,#1f2329)}',
+      '.dslb-linkBtn:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
+      'outline-offset:1px}',
       '.dslb-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}',
       '.dslb-title{display:flex;align-items:center;gap:8px;min-width:0;font-size:14px;line-height:20px}',
       '.dslb-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -560,6 +635,23 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** One session item, wherever it is listed (flat list or inside a workspace). */
+    function projectSessions(entries) {
+      return list(entries).map((entry) => {
+        const session = record(entry)
+        if (session === null) return null
+        const sessionId = text(session.sessionId, '')
+        if (sessionId === '') return null
+        return {
+          sessionId,
+          title: text(session.title, ''),
+          running: session.running === true,
+          cwd: text(session.cwd, ''),
+          shared: session.shared === true,
+        }
+      }).filter((session) => session !== null)
+    }
+
     /**
      * Project the Host payload onto the panel's shape. Every field is optional
      * from the panel's point of view: a partial or malformed payload must
@@ -627,19 +719,25 @@ window.__ModuleLoader__.load({
           if (name === '') return null
           return { name, url: text(peer.url, ''), reachable: peer.reachable === true }
         }).filter((peer) => peer !== null),
-        sessions: list(root.sessions).map((entry) => {
-          const session = record(entry)
-          if (session === null) return null
-          const sessionId = text(session.sessionId, '')
-          if (sessionId === '') return null
-          return {
-            sessionId,
-            title: text(session.title, ''),
-            running: session.running === true,
-            cwd: text(session.cwd, ''),
-            shared: session.shared === true,
-          }
-        }).filter((session) => session !== null),
+        sessions: projectSessions(root.sessions),
+        // The grouped view. `null` means "this Host does not group" (an older
+        // Host, or a Host that failed to enumerate workspaces) and the panel
+        // falls back to the flat list — never to an error.
+        workspaces: Array.isArray(root.workspaces)
+          ? root.workspaces.map((entry) => {
+            const group = record(entry)
+            if (group === null) return null
+            const workspaceId = text(group.workspaceId, '')
+            if (workspaceId === '') return null
+            return {
+              workspaceId,
+              title: text(group.title, ''),
+              path: text(group.path, ''),
+              shared: group.shared === true,
+              sessions: projectSessions(group.sessions),
+            }
+          }).filter((group) => group !== null)
+          : null,
       }
     }
 
@@ -1390,10 +1488,12 @@ window.__ModuleLoader__.load({
 
     /**
      * One Session row: identity on the left, the sharing switch on the right.
-     * The switch is optimistic and reverts when the route refuses.
+     * The switch is optimistic and reverts when the route refuses. `locked`
+     * means the owning workspace is shared as a whole, so the effective value
+     * cannot be turned off per session.
      */
     function SessionRow(props) {
-      const { session, shared, pending, failure, t, onToggle } = props
+      const { session, shared, pending, failure, locked, t, onToggle } = props
       const title = session.title === '' ? session.sessionId : session.title
       const cwd = session.cwd === '' ? t('empty') : session.cwd
       return h('div', { className: 'dslb-row' },
@@ -1406,35 +1506,148 @@ window.__ModuleLoader__.load({
           failure === '' ? null : h('div', { className: 'dslb-desc', role: 'alert' }, failure)),
         h('div', { className: 'dslb-side' },
           h(Switch, {
-            checked: shared,
+            checked: locked ? true : shared,
             busy: pending,
-            disabled: pending,
+            disabled: pending || locked,
             label: t('share'),
-            title: `${t('share')} · ${title}`,
+            title: locked ? t('wsWholeShared') : `${t('share')} · ${title}`,
             onChange: () => onToggle(session, !shared),
           })))
     }
 
     /**
-     * 4. The sharing switches: the panel's main decision surface. A toggle is
-     * optimistic and reverts, naming the Host's reason in the row.
+     * One workspace: a collapsible header (chevron, name, mono path, counts,
+     * whole-workspace switch) over its session rows. A workspace with no
+     * sessions is still listed — an operator can share it for future sessions.
+     */
+    function WorkspaceGroup(props) {
+      const {
+        group, open, shared, pending, failure,
+        overrides, sessionPending, sessionFailures,
+        t, onToggleOpen, onToggleWorkspace, onToggleSession,
+      } = props
+      const label = group.title !== ''
+        ? group.title
+        : (group.workspaceId === 'ungrouped'
+          ? t('wsOther')
+          : (group.path !== '' ? group.path : group.workspaceId))
+      const effective = (session) => (Object.prototype.hasOwnProperty.call(overrides, session.sessionId)
+        ? overrides[session.sessionId]
+        : session.shared)
+      const sharedCount = group.sessions.filter((session) => effective(session)).length
+      const meta = [t('wsSessions', { count: group.sessions.length })]
+      if (sharedCount > 0) meta.push(t('wsSharedCount', { count: sharedCount }))
+      return h('div', { className: 'dslb-wsGroup' },
+        h('div', { className: 'dslb-wsHead' },
+          h('button', {
+            type: 'button',
+            className: 'dslb-wsToggle',
+            'aria-expanded': open ? 'true' : 'false',
+            'aria-label': open ? t('wsCollapse') : t('wsExpand'),
+            onClick: () => onToggleOpen(group.workspaceId),
+          },
+            h('span', { className: 'dslb-chevron', 'data-open': open ? '1' : '0', 'aria-hidden': 'true' }),
+            h('span', { className: 'dslb-wsIdentity' },
+              h('span', { className: 'dslb-wsTitleLine' },
+                h('span', { className: 'dslb-wsTitle', title: label }, label),
+                h('span', { className: 'dslb-wsMeta' }, meta.join(' · '))),
+              group.path === '' ? null : h('span', { className: 'dslb-wsPath', title: group.path }, clamp(group.path)))),
+          h('span', { className: 'dslb-side' },
+            h(Switch, {
+              checked: shared,
+              busy: pending,
+              disabled: pending,
+              label: t('wsShareAll'),
+              title: t('wsShareHint'),
+              onChange: () => onToggleWorkspace(group, !shared),
+            }))),
+        failure === '' ? null : h('div', { className: 'dslb-wsHint', role: 'alert' }, failure),
+        shared ? h('div', { className: 'dslb-wsHint' }, t('wsWholeShared')) : null,
+        open
+          ? h('div', { className: 'dslb-wsBody' },
+            group.sessions.length === 0
+              ? h(Empty, { title: t('wsEmpty'), next: t('wsEmptyNext') })
+              : group.sessions.map((session) => h(SessionRow, {
+                key: session.sessionId,
+                session,
+                shared: effective(session),
+                pending: sessionPending[session.sessionId] === true,
+                failure: text(sessionFailures[session.sessionId], ''),
+                locked: shared,
+                t,
+                onToggle: onToggleSession,
+              })))
+          : null)
+    }
+
+    /**
+     * 4. Session sharing: the panel's main decision surface. When the Host
+     * groups Sessions by workspace the card renders one collapsible group per
+     * workspace (all collapsed to start); an older Host without `workspaces`
+     * keeps the flat list. Either way a toggle is optimistic and reverts,
+     * naming the Host's reason in place.
      */
     function Sessions(props) {
-      const { data, t, overrides, pending, failures, onToggle } = props
-      return h(Card, { title: t('sessions'), hint: t('sessionsHint') },
-        data.sessions.length === 0
+      const {
+        data, t, overrides, pending, failures,
+        wsOverrides, wsPending, wsFailures, openGroups,
+        onToggle, onToggleWorkspace, onToggleOpen, onToggleAll,
+      } = props
+      const flat = () => h('div', { className: 'dslb-list' }, data.sessions.map((session) => {
+        const id = session.sessionId
+        const shared = Object.prototype.hasOwnProperty.call(overrides, id) ? overrides[id] : session.shared
+        return h(SessionRow, {
+          key: id,
+          session,
+          shared,
+          pending: pending[id] === true,
+          failure: text(failures[id], ''),
+          locked: false,
+          t,
+          onToggle,
+        })
+      }))
+      if (data.workspaces === null) {
+        return h(Card, { title: t('sessions'), hint: t('sessionsHint') },
+          data.sessions.length === 0
+            ? h(Empty, { title: t('noSessions'), next: t('noSessionsNext') })
+            : flat())
+      }
+      // The synthesized "ungrouped" bucket is noise while it is empty; a real
+      // workspace with no sessions is still worth showing (share it up front).
+      const groups = data.workspaces.filter((group) => !(group.workspaceId === 'ungrouped' && group.sessions.length === 0))
+      const allOpen = groups.length > 0 && groups.every((group) => openGroups[group.workspaceId] === true)
+      return h(Card, {
+        title: t('sessions'),
+        hint: t('sessionsHint'),
+        actions: groups.length === 0
+          ? null
+          : h('button', {
+            type: 'button',
+            className: 'dslb-linkBtn',
+            'aria-expanded': allOpen ? 'true' : 'false',
+            onClick: () => onToggleAll(!allOpen),
+          }, allOpen ? t('wsCollapseAll') : t('wsExpandAll')),
+      },
+        groups.length === 0
           ? h(Empty, { title: t('noSessions'), next: t('noSessionsNext') })
-          : h('div', { className: 'dslb-list' }, data.sessions.map((session) => {
-            const id = session.sessionId
-            const shared = Object.prototype.hasOwnProperty.call(overrides, id) ? overrides[id] : session.shared
-            return h(SessionRow, {
+          : h('div', { className: 'dslb-list' }, groups.map((group) => {
+            const id = group.workspaceId
+            const shared = Object.prototype.hasOwnProperty.call(wsOverrides, id) ? wsOverrides[id] : group.shared
+            return h(WorkspaceGroup, {
               key: id,
-              session,
+              group,
+              open: openGroups[id] === true,
               shared,
-              pending: pending[id] === true,
-              failure: text(failures[id], ''),
+              pending: wsPending[id] === true,
+              failure: text(wsFailures[id], ''),
+              overrides,
+              sessionPending: pending,
+              sessionFailures: failures,
               t,
-              onToggle,
+              onToggleOpen,
+              onToggleWorkspace,
+              onToggleSession: onToggle,
             })
           })))
     }
@@ -1818,6 +2031,13 @@ window.__ModuleLoader__.load({
       const [overrides, setOverrides] = React.useState({})
       const [pending, setPending] = React.useState({})
       const [failures, setFailures] = React.useState({})
+      // Workspace-level sharing: same optimistic shape, keyed by workspaceId.
+      const [wsOverrides, setWsOverrides] = React.useState({})
+      const [wsPending, setWsPending] = React.useState({})
+      const [wsFailures, setWsFailures] = React.useState({})
+      // Which groups are open. Everything starts collapsed: the operator asked
+      // for a hierarchy, not for a wall of switches.
+      const [openGroups, setOpenGroups] = React.useState({})
 
       const toggle = React.useCallback((session, next) => {
         const id = session.sessionId
@@ -1843,6 +2063,52 @@ window.__ModuleLoader__.load({
             })
           })
       }, [reload, t])
+
+      const toggleWorkspace = React.useCallback((group, next) => {
+        const id = group.workspaceId
+        setWsOverrides((previous) => ({ ...previous, [id]: next }))
+        setWsPending((previous) => ({ ...previous, [id]: true }))
+        setWsFailures((previous) => ({ ...previous, [id]: '' }))
+        void mutate(ROUTE.shareWorkspace, { workspaceId: id, shared: next })
+          .then(() => reload())
+          .then(() => {
+            // The fresh read is authoritative, so the optimistic value is
+            // dropped as soon as the Host's own answer is on screen: the
+            // workspace rule also changes every session's effective value, and
+            // re-deriving that locally would only invent a second truth.
+            setWsOverrides((previous) => {
+              const copy = { ...previous }
+              delete copy[id]
+              return copy
+            })
+          })
+          .catch((error) => {
+            setWsOverrides((previous) => {
+              const copy = { ...previous }
+              delete copy[id]
+              return copy
+            })
+            setWsFailures((previous) => ({ ...previous, [id]: `${t('wsShareFailed')}: ${describe(error)}` }))
+          })
+          .finally(() => {
+            setWsPending((previous) => {
+              const copy = { ...previous }
+              delete copy[id]
+              return copy
+            })
+          })
+      }, [reload, t])
+
+      const toggleOpen = React.useCallback((id) => {
+        setOpenGroups((previous) => ({ ...previous, [id]: previous[id] !== true }))
+      }, [])
+
+      const toggleAll = React.useCallback((next) => {
+        const groups = data === null || data.workspaces === null ? [] : data.workspaces
+        const map = {}
+        for (const group of groups) map[group.workspaceId] = next
+        setOpenGroups(map)
+      }, [data])
 
       // The page head names the surface; the cards below do the talking.
       const header = h(React.Fragment, null,
@@ -1873,7 +2139,21 @@ window.__ModuleLoader__.load({
         h(StatusHero, { data, t }),
         h(ListenSettings, { data, t, applyState }),
         h(Peers, { data, t, reload }),
-        h(Sessions, { data, t, overrides, pending, failures, onToggle: toggle }),
+        h(Sessions, {
+          data,
+          t,
+          overrides,
+          pending,
+          failures,
+          wsOverrides,
+          wsPending,
+          wsFailures,
+          openGroups,
+          onToggle: toggle,
+          onToggleWorkspace: toggleWorkspace,
+          onToggleOpen: toggleOpen,
+          onToggleAll: toggleAll,
+        }),
         h(Discovery, { data, t }))
     }
 

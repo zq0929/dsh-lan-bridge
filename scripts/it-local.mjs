@@ -26,6 +26,7 @@ import { installUi } from '../lib/ui.js'
 import { createSettingsApplier, loadPersistedSettings } from '../lib/settings.js'
 import { localAddresses, resolveConfig } from '../lib/config.js'
 import { SERVICE, buildQuery, buildResponse, decodeName, encodeName, parsePacket } from '../lib/mdns.js'
+import { applyRulesToSession, materializeWorkspaceShares, pathKey, sessionGroups, setWorkspaceShare } from '../lib/workspaces.js'
 
 let failures = 0
 let passes = 0
@@ -112,15 +113,15 @@ function createFakeSessions(ctx) {
     return session
   }
 
-  function create({ sessionId, title, running = false, records = [] }) {
+  function create({ sessionId, title, running = false, records = [], cwd = '/tmp', updatedAt = Date.now() }) {
     const session = {
       summary: {
         sessionId,
         agentAvailable: true,
-        updatedAt: Date.now(),
+        updatedAt,
         running,
         blank: records.length === 0,
-        cwd: '/tmp',
+        cwd,
         projections: { values: { title } },
       },
       title,
@@ -1250,6 +1251,126 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   }
   alpha.stop()
   beta.stop()
+}
+
+// --- workspace grouping & whole-workspace share --------------------------
+{
+  steps.push('')
+  steps.push('workspace grouping')
+
+  // A real DSH Workspace registration: stable UUID + canonical path + title.
+  // `sessionIds` is exactly what WorkspaceEntity.sessionIds returns.
+  const registrations = [
+    {
+      id: 'w-alpha',
+      title: 'Alpha Project',
+      path: '/home/dev/alpha',
+      sessionIds: ['session-ws-a1', 'session-ws-a2'],
+    },
+    { id: 'w-empty', title: 'Empty Space', path: '/home/dev/empty', sessionIds: [] },
+  ]
+  ctx.provide('workspaceRegistry', {
+    list() { return registrations },
+  })
+  const t0 = Date.now()
+  fake.create({ sessionId: 'session-ws-a1', title: 'alpha one', cwd: '/home/dev/alpha', updatedAt: t0 + 30 })
+  fake.create({ sessionId: 'session-ws-a2', title: 'alpha two', cwd: '/home/dev/alpha', updatedAt: t0 + 20 })
+  fake.create({ sessionId: 'session-ws-b1', title: 'beta one', cwd: '/home/dev/beta', updatedAt: t0 + 10 })
+  fake.create({ sessionId: 'session-ws-orphan', title: 'no cwd', cwd: '', updatedAt: t0 })
+
+  const grouped = await sessionGroups({ ctx, store })
+  const alpha = grouped.workspaces.find(group => group.workspaceId === 'w-alpha')
+  const beta = grouped.workspaces.find(group => group.workspaceId === pathKey('/home/dev/beta'))
+  const empty = grouped.workspaces.find(group => group.workspaceId === 'w-empty')
+  const ungrouped = grouped.workspaces.find(group => group.workspaceId === 'ungrouped')
+  check('registry group carries its title', alpha?.title === 'Alpha Project', JSON.stringify(alpha?.title))
+  check('registry group holds both registered sessions', alpha?.sessions.length === 2, String(alpha?.sessions.length))
+  check('cwd synthesizes a group for unregistered sessions', beta?.sessions.length === 1, JSON.stringify(beta))
+  check('empty workspace is still listed', empty !== undefined && empty.sessions.length === 0, JSON.stringify(empty))
+  check('no-cwd session lands in ungrouped', ungrouped?.sessions.length === 1, JSON.stringify(ungrouped))
+  check('ungrouped is last', grouped.workspaces.at(-1)?.workspaceId === 'ungrouped', JSON.stringify(grouped.workspaces.map(group => group.workspaceId)))
+  check('flat sessions view still present', Array.isArray(grouped.sessions) && grouped.sessions.length >= 4, String(grouped.sessions.length))
+  check('grouped session shape has effective shared flag', alpha.sessions.every(session => typeof session.shared === 'boolean'))
+  check('grouped session shape is lossless JSON', undefinedPaths(grouped).length === 0, JSON.stringify(undefinedPaths(grouped)))
+
+  const stateBefore = await uiCall('state')
+  check('panel state exposes workspaces', Array.isArray(stateBefore.workspaces) && stateBefore.workspaces.length >= 4, JSON.stringify(stateBefore.workspaces?.length))
+  check('panel state keeps the flat legacy sessions', Array.isArray(stateBefore.sessions))
+
+  // A human share must survive a rule being turned off.
+  await store.setShared('session-ws-a2', true)
+
+  const badWorkspace = await uiCall('shareWorkspace', { workspaceId: 'does-not-exist', shared: true })
+  equal('unknown workspace refused', badWorkspace.ok, false)
+  equal('unknown workspace error code', badWorkspace.error.code, 'bridge/bad-request')
+  const missingId = await uiCall('shareWorkspace', { shared: true })
+  equal('missing workspaceId refused', missingId.ok, false)
+
+  const sharedAll = await uiCall('shareWorkspace', { workspaceId: 'w-alpha', shared: true })
+  equal('whole-workspace share accepted', sharedAll.ok, true)
+  const stateShared = await uiCall('state')
+  const alphaShared = stateShared.workspaces.find(group => group.workspaceId === 'w-alpha')
+  check('group reads back as shared', alphaShared?.shared === true, JSON.stringify(alphaShared?.shared))
+  check('every session under the rule is effectively shared', alphaShared.sessions.every(session => session.shared === true), JSON.stringify(alphaShared.sessions))
+  const liveUrl = `http://127.0.0.1:${String(server.status.port)}`
+  const liveRpc = async (method, params) => {
+    const response = await fetch(`${liveUrl}/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id: 'it', method, params }),
+    })
+    return response.json()
+  }
+  const listed = await liveRpc('session.list', {})
+  const listedIds = listed.result.sessions.map(session => session.sessionId)
+  check('rule materialized shares for session.list', listedIds.includes('session-ws-a1') && listedIds.includes('session-ws-a2'), JSON.stringify(listedIds))
+  check('sessions outside the rule stay hidden', !listedIds.includes('session-ws-b1'), JSON.stringify(listedIds))
+  const auto = await store.autoShares()
+  equal('human-shared session was not adopted by the rule', auto['session-ws-a2'], undefined)
+  equal('rule owns the other session', auto['session-ws-a1'], 'w-alpha')
+
+  // A new Session announced by the Host joins the rule immediately. (it-local
+  // wires the components directly, so it exercises the listener's handler
+  // function rather than index.js's subscription.)
+  fake.create({ sessionId: 'session-ws-a3', title: 'alpha three', cwd: '/home/dev/alpha' })
+  await applyRulesToSession({ store, sessionId: 'session-ws-a3', cwd: '/home/dev/alpha' })
+  equal('new Session joins the workspace rule', await store.isShared('session-ws-a3'), true)
+  equal('repeat rule application is idempotent', await applyRulesToSession({ store, sessionId: 'session-ws-a3', cwd: '/home/dev/alpha' }), false)
+  const beforeChurn = (await readFile(join(stateDir, 'bridge.json'), 'utf8'))
+  await applyRulesToSession({ store, sessionId: 'session-ws-a3', cwd: '/home/dev/alpha' })
+  equal('idempotent rule application does not rewrite bridge.json', await readFile(join(stateDir, 'bridge.json'), 'utf8'), beforeChurn)
+
+  const off = await uiCall('shareWorkspace', { workspaceId: 'w-alpha', shared: false })
+  equal('whole-workspace unshare accepted', off.ok, true)
+  check('human-shared session survives rule off', await store.isShared('session-ws-a2'), true)
+  equal('rule-owned session is revoked on rule off', await store.isShared('session-ws-a1'), false)
+  equal('auto-owned new session is revoked on rule off', await store.isShared('session-ws-a3'), false)
+  const autoOff = await store.autoShares()
+  equal('autoShares cleared on rule off', Object.keys(autoOff).length, 0)
+
+  // Startup reconciliation is idempotent and never adopts a human decision.
+  await store.setWorkspaceShared({ workspaceId: 'w-alpha', path: '/home/dev/alpha', shared: true })
+  const first = await materializeWorkspaceShares({ ctx, store })
+  check('startup reconcile reports rule-owned sessions', first.sessions >= 2, JSON.stringify(first))
+  const second = await materializeWorkspaceShares({ ctx, store })
+  equal('startup reconcile is idempotent', second.sessions, first.sessions)
+  check('startup reconcile keeps the human share', await store.isShared('session-ws-a2'), true)
+  equal('startup reconcile did not adopt the human share', (await store.autoShares())['session-ws-a2'], undefined)
+
+  // A cwd-based rule groups Sessions on a Host without the registry, too.
+  await store.setWorkspaceShared({ workspaceId: 'w-beta-rule', path: '/home/dev/beta', shared: true })
+  ctx.provide('workspaceRegistry', undefined)
+  const noRegistry = await sessionGroups({ ctx, store })
+  const betaRule = noRegistry.workspaces.find(group => group.workspaceId === 'w-beta-rule')
+  check('cwd rule groups sessions without a registry', betaRule?.sessions.length === 1, JSON.stringify(betaRule))
+  check('cwd rule reports shared without a registry', betaRule?.shared === true, JSON.stringify(betaRule?.shared))
+  ctx.provide('workspaceRegistry', { list() { return registrations } })
+
+  // Cleanup so later sections (audit) see a tidy store.
+  await store.setWorkspaceShared({ workspaceId: 'w-alpha', path: '/home/dev/alpha', shared: false })
+  await store.setWorkspaceShared({ workspaceId: 'w-beta-rule', path: '/home/dev/beta', shared: false })
+  await materializeWorkspaceShares({ ctx, store })
+  await store.setShared('session-ws-a2', false)
 }
 
 // --- audit ---------------------------------------------------------------

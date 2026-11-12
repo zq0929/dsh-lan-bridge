@@ -18,6 +18,7 @@ import { installTools } from './lib/tools.js'
 import { installUi } from './lib/ui.js'
 import { createSettingsApplier, loadPersistedSettings, syncDiscovery } from './lib/settings.js'
 import { createDiscovery } from './lib/mdns.js'
+import { applyRulesToSession, materializeWorkspaceShares } from './lib/workspaces.js'
 
 /** Loader entry identity, matching the row id in `cordis.patch.yml`. */
 export const name = 'lan-bridge'
@@ -85,6 +86,31 @@ export function apply(ctx, config) {
   }, 'lan-bridge: mdns')
 
   const applySettings = createSettingsApplier({ cfg, store, server, logger, ready, discovery })
+
+  // A whole-workspace rule is persisted, but the gates that actually let a peer
+  // in read `store.isShared` per Session. Rebuild those decisions once after the
+  // persisted settings have been loaded, then keep them current as Sessions
+  // appear. Best-effort: a missing sessionController must not stop the bridge.
+  ctx.effect(() => {
+    let stopped = false
+    void ready
+      .then(() => materializeWorkspaceShares({ ctx, store }))
+      .then((outcome) => {
+        if (outcome.sessions > 0) {
+          logger?.info?.(`lan-bridge: ${String(outcome.sessions)} Sessions auto-shared by ${String(outcome.active.length)} workspace rule(s)`)
+        }
+      })
+      .catch((error) => logger?.warn?.(`lan-bridge: workspace reconcile failed: ${String(error)}`))
+    const off = ctx.on('api-session/added', (summary) => {
+      if (stopped || summary === undefined || summary === null) return
+      void applyRulesToSession({ store, sessionId: summary.sessionId, cwd: summary.cwd })
+        .catch((error) => logger?.warn?.(`lan-bridge: workspace rule for new Session failed: ${String(error)}`))
+    })
+    return () => {
+      stopped = true
+      off()
+    }
+  }, 'lan-bridge: workspace rules')
 
   if (cfg.controlling) {
     installTools({ ctx, cfg, store, remote, server, logger, peerCache, discovery })
