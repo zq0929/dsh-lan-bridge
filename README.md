@@ -148,7 +148,7 @@
 
 | 工具 | 作用 |
 | --- | --- |
-| `lan_dsh_peers` | `list` / `add` / `check` / `remove`：配置与探测 peer；`pair`：**本机**签发一次性 token（可指定 `capabilities`；面板里也是六个能力位随便勾） |
+| `lan_dsh_peers` | `list` / `add` / `check` / `remove`：配置与探测 peer；`pair`：**本机**签发一次性 token（可指定 `capabilities`；面板里也是各能力位随便勾）；`grant`：给**已配对**的对端原位改权限，不换 token |
 | `lan_dsh_archive` | `archive` / `unarchive` 会话（`peer` 省略则作用于本机）；归档不删历史，可撤销；运行中的会话要 `stopActivity` 才归档 |
 | `lan_dsh_share` | `list` / `share` / `unshare`：**本机**会话共享开关（peer 永远不能调这个） |
 | `lan_dsh_sessions` | 列 peer 共享出来的会话 |
@@ -194,6 +194,10 @@ lan_dsh_approval { action: "answer", peer: "b-mac", id: "8b1d…", decision: "al
 规则（写死，不能改配置绕过）：
 
 - `approve` **不在默认能力里**，配对只会给 `read`+`prompt`；签发它等于把"允许本机跑一次被拦下的工具调用"的权力交出去。
+- **已经发出去的 token 不会自动获得 `approve`**（也不会自动失去）。要提权用
+  `lan_dsh_peers action=grant name=b-mac capabilities=["read","prompt","approve"]` —— 原位改、token 不变，
+  不必让对方重配；`capabilities` 是**替换**不是追加，要给全集。
+- 两台机器各自独立：A 能代答 B 的审批，只取决于 **B 上签给 A 的 token** 有没有 `approve`，与 A 签给 B 的无关，所以谁先配都行。
 - 只对**已共享会话**生效；未共享会话的审批既列不出来也答不了。
 - 代答是**有界等待**：120 秒（`approvalRelayMs`）内没收到远端答复就自动落回本机的人工弹窗，所以不会把回合卡死。
 - 每次代答在 `audit.jsonl` 里留一行（`method: "approval.answer"`），含 peer、会话、工具、决定。

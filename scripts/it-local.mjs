@@ -47,6 +47,17 @@ function note(message) {
   steps.push(`  note ${message}`)
 }
 
+// A crash must not swallow the run: everything asserted so far is flushed to
+// stdout before the process dies, so a platform-specific failure is readable.
+function flushAndExit(reason) {
+  console.log(steps.join('\n'))
+  console.log('')
+  console.log(`aborted: ${reason} (${String(passes)} passed before the crash)`)
+  process.exitCode = 1
+}
+process.on('uncaughtException', (error) => { flushAndExit(error?.stack ?? String(error)) })
+process.on('unhandledRejection', (reason) => { flushAndExit(String(reason?.stack ?? reason)) })
+
 function equal(label, actual, expected) {
   check(label, actual === expected, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
 }
@@ -767,6 +778,27 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('pair without capabilities defaults to read+prompt',
     limited.inbound.find(item => item.name === 'looker').capabilities.join(','), 'read,prompt')
 
+  // grant: promote a live peer in place. The token must keep working, because
+  // the whole point is not having to mail a new secret.
+  const granted = await exec('lan_dsh_peers', {
+    action: 'grant', name: 'looker', capabilities: ['read', 'prompt', 'approve'],
+  })
+  equal('grant ok', granted.ok, true)
+  equal('grant replaces the capability list',
+    granted.inbound.find(item => item.name === 'looker').capabilities.join(','), 'read,prompt,approve')
+  const lookerState = await rpc('session.state', { sessionId: target.summary.sessionId }, { token: limited.token })
+  equal('the granted token is unchanged and still works', lookerState.body.ok, true)
+  const emptyGrant = await exec('lan_dsh_peers', { action: 'grant', name: 'looker', capabilities: [] }).then(
+    () => ({ ok: true }), (error) => ({ ok: false, code: error?.code }),
+  )
+  equal('grant without capabilities refused', emptyGrant.ok, false)
+  equal('grant without capabilities names the field', emptyGrant.code, 'bridge/bad-request')
+  const unknownGrant = await exec('lan_dsh_peers', { action: 'grant', name: 'nobody', capabilities: ['read'] }).then(
+    () => ({ ok: true }), (error) => ({ ok: false, code: error?.code }),
+  )
+  equal('grant unknown peer refused', unknownGrant.ok, false)
+  equal('grant unknown peer error code', unknownGrant.code, 'bridge/not-found')
+
   const added = await exec('lan_dsh_peers', { action: 'add', name: 'loopback', url, token })
   equal('peer add ok', added.ok, true)
   equal('peer add reachable', added.peers[0].reachable, true)
@@ -1098,11 +1130,15 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('persisted port is what the operator asked for', persisted.port, 0)
 
   const port = server.status.port
-  const broken = await uiCall('settings', { port: 1 })
-  equal('unbindable port refused', broken.ok, false)
-  equal('unbindable port error code', broken.error.code, 'bridge/internal')
+  // Fail the rebind on an address this machine does not hold (TEST-NET-3,
+  // RFC 5737). Port 1 is *not* a usable probe: Windows lets an unprivileged
+  // process bind it, so that assertion only failed on POSIX.
+  const broken = await uiCall('settings', { host: '203.0.113.7', port })
+  equal('unbindable address refused', broken.ok, false)
+  equal('unbindable address error code', broken.error.code, 'bridge/internal')
   equal('listener survived the failed rebind', server.status.listening, true)
   equal('listener kept its port', server.status.port, port)
+  equal('listener kept its address after the rollback', (await store.settings()).host, '127.0.0.1')
 
   // --- machine name: editable, live, and it does not touch the socket ------
   equal('state exposes the machine name', initial.settings.name, 'it-machine')

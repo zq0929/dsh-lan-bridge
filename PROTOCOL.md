@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.13", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.14", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -69,8 +69,12 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 `name` is the listener's configured peer-visible name. `session.create` is false unless
 `allowPeersToCreateSessions`. `approval.list` / `approval.answer` are advertised `true` from
-0.3.13, but answering still needs a token minted with the `approve` capability, which pairing
-never grants by default.
+0.3.13, but answering still needs a token carrying the `approve` capability, which pairing never
+grants by default. Capabilities are fixed per token: an already-issued token does not gain
+`approve` on upgrade — the operator either pairs a new one or runs
+`lan_dsh_peers action=grant name=<peer> capabilities=[…]` on the listening machine, which rewrites
+that peer's capabilities in place and leaves its token valid. Each direction is independent: A may
+answer B's approvals only if B's record for A carries `approve`.
 
 ### `session.list` → params `{}`
 
