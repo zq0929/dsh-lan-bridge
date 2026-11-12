@@ -1428,6 +1428,35 @@ async function scenario_files_save_bytes() {
   results.push('saving the files block converts MiB to bytes and posts every root')
 }
 
+async function scenario_files_row_layout() {
+  // A fresh row must not be scolded, and every row must keep one error line of
+  // height so the four columns still share a baseline (the reported bug).
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.settings')) {
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, state: withFiles() } }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: withFiles() }
+  })
+  mount()
+  await settle()
+  clickable(rendered, '新增根目录').props.onClick()
+  await settle()
+  const rows = byClass(rendered, 'dslb-rootRow').length
+  const lines = byClass(rendered, 'dslb-rootError')
+  assert(rows === 3, `row layout: the three roots render (got ${String(rows)})`)
+  assert(lines.length === rows * 2, `row layout: every field reserves one error line (got ${String(lines.length)} for ${String(rows)} rows)`)
+  assert(textOf(rendered).includes('路径不能为空') === false, 'row layout: an untouched new row is not an error yet')
+  await type('名称 3', 'drafts')
+  await settle()
+  assert(textOf(rendered).includes('路径不能为空'), 'row layout: once the row has content, the missing path is named')
+  const fields = byClass(rendered, 'dslb-rootField')
+  assert(fields.length === rows * 2, `row layout: name and path are root fields (got ${String(fields.length)})`)
+  await type('路径 3', '/home/dev/drafts')
+  await settle()
+  assert(textOf(rendered).includes('路径不能为空') === false, 'row layout: the message clears as soon as the path is given')
+  results.push('files rows reserve their error line, and an untouched row is not an error')
+}
+
 async function scenario_files_missing() {
   reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: LIVE_STATE }))
   mount()
@@ -1516,6 +1545,7 @@ const scenarios = [
   scenario_settings_malformed,
   scenario_files_card_renders,
   scenario_files_save_bytes,
+  scenario_files_row_layout,
   scenario_files_missing,
   scenario_pair_files_unchecked,
 ]

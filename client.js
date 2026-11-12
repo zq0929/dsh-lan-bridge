@@ -573,11 +573,14 @@ window.__ModuleLoader__.load({
       '.dslb-cardPosture{margin:0;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-label-secondary,#5b6270);overflow-wrap:anywhere}',
       '.dslb-roots{display:flex;flex-direction:column;min-width:0}',
-      '.dslb-rootRow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.7fr) auto auto;',
-      'gap:10px 12px;align-items:end;min-width:0;padding:10px 0}',
+      '.dslb-rootRow{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,2fr) auto auto;',
+      'gap:0 12px;align-items:start;min-width:0;padding:12px 0}',
       '.dslb-rootRow+.dslb-rootRow{border-top:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2))}',
-      '.dslb-rootWritable{display:flex;flex-direction:column;gap:6px;align-items:flex-start;min-width:0}',
-      '.dslb-rootActions{display:flex;align-items:flex-end;min-width:0;padding-bottom:1px}',
+      '.dslb-rootField{display:flex;flex-direction:column;gap:4px;min-width:0}',
+      '.dslb-rootError{min-height:18px;margin:2px 0 0}',
+      '.dslb-rootWritable{display:flex;flex-direction:column;gap:4px;align-items:flex-start;min-width:0}',
+      '.dslb-rootWritable .dslb-switch{margin-top:6px}',
+      '.dslb-rootActions{display:flex;align-items:flex-start;min-width:0;padding-top:22px}',
       '.dslb-rootFoot{display:flex;align-items:center;justify-content:flex-start;gap:12px;flex-wrap:wrap}',
       '.dslb-formError{margin:2px 0 0;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-state-error-primary,#ec1313)}',
@@ -1477,9 +1480,13 @@ window.__ModuleLoader__.load({
           if (rootName !== '' && !FILE_ROOT_NAME.test(rootName)) nameError = 'filesRootNameInvalid'
           else if (rootName !== '' && seen[key] === true) nameError = 'filesRootNameDuplicate'
           if (rootName !== '') seen[key] = true
+          // A freshly added, still-empty row is not a mistake yet — it is a row
+          // waiting for input. Complaining here just puts a red line under an
+          // empty field the moment you click "add".
+          const touched = rootName !== '' || root.path.trim() !== ''
           return {
-            name: nameError,
-            path: root.path.trim() === '' ? 'filesRootPathMissing' : '',
+            name: touched ? nameError : '',
+            path: root.path.trim() === '' && touched ? 'filesRootPathMissing' : '',
           }
         })
       })()
@@ -1801,8 +1808,15 @@ window.__ModuleLoader__.load({
     function FileRootRow(props) {
       const { index, root, errors, disabled, t, onUpdate, onRemove } = props
       const position = index + 1
+      // Every field keeps one empty error line, whether or not it has a message:
+      // otherwise the first complaint pushes its own input up and the four columns
+      // stop sharing a baseline (that is exactly what looked broken).
+      const errorLine = (message) => h('span', {
+        className: 'dslb-formError dslb-rootError',
+        role: message === '' ? undefined : 'alert',
+      }, message === '' ? '' : t(message))
       return h('div', { className: 'dslb-rootRow' },
-        h('label', { className: 'dslb-formField' },
+        h('label', { className: 'dslb-rootField' },
           h('span', { className: 'dslb-formLabel' }, t('filesRootName')),
           h('input', {
             className: 'dslb-input',
@@ -1812,8 +1826,8 @@ window.__ModuleLoader__.load({
             'aria-label': `${t('filesRootName')} ${position}`,
             onChange: (event) => onUpdate(index, { name: event.currentTarget.value }),
           }),
-          errors.name === '' ? null : h('span', { className: 'dslb-formError' }, t(errors.name))),
-        h('label', { className: 'dslb-formField' },
+          errorLine(errors.name)),
+        h('label', { className: 'dslb-rootField' },
           h('span', { className: 'dslb-formLabel' }, t('filesRootPath')),
           h('input', {
             className: 'dslb-input dslb-inputMono',
@@ -1823,7 +1837,7 @@ window.__ModuleLoader__.load({
             'aria-label': `${t('filesRootPath')} ${position}`,
             onChange: (event) => onUpdate(index, { path: event.currentTarget.value }),
           }),
-          errors.path === '' ? null : h('span', { className: 'dslb-formError' }, t(errors.path))),
+          errorLine(errors.path)),
         h('div', { className: 'dslb-rootWritable' },
           h('span', { className: 'dslb-formLabel' }, t('filesRootWritable')),
           h(Switch, {
