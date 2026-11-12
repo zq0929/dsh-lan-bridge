@@ -9,21 +9,30 @@ on:
 jobs:
   offline-suite:
     name: offline suite (no DSH needed)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: syntax check every shipped module
+      - name: syntax check every shipped module (bash)
+        if: runner.os != 'Windows'
         run: |
           node --check index.js
           node --check client.js
           for file in lib/*.js scripts/*.mjs; do node --check "$file"; done
+      - name: syntax check every shipped module (pwsh)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node --check index.js
+          node --check client.js
+          Get-ChildItem lib/*.js, scripts/*.mjs | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
       - name: offline integration suite
         run: node scripts/it-local.mjs
       - name: offline suite, mDNS on a scratch port (busy-port path)
@@ -32,5 +41,12 @@ jobs:
           LAN_BRIDGE_MDNS_PORT: '15353'
       - name: panel smoke suite (renders the real client.js without React)
         run: node scripts/panel-smoke.mjs
-      - name: fail if the run left state behind
+      - name: fail if the run left state behind (bash)
+        if: runner.os != 'Windows'
         run: test ! -e bridge.json && test ! -e audit.jsonl
+      - name: fail if the run left state behind (pwsh)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (Test-Path bridge.json) { throw 'bridge.json left behind' }
+          if (Test-Path audit.jsonl) { throw 'audit.jsonl left behind' }

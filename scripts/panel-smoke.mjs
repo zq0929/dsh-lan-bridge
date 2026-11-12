@@ -10,8 +10,11 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+// `new URL('..', import.meta.url).pathname` is "/D:/..." on Windows, and
+// path.join then produces "D:\D:\..." — fileURLToPath is the portable form.
+const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '')
 const SRC = fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8')
 
 // ---------------------------------------------------------------- mini react
