@@ -18,6 +18,17 @@ vulnerability). A reproducer and the affected version (`bridge.hello` → `versi
 - Path traversal or arbitrary file access through the TLS options or the state directory.
 - Persistent privilege after `revoke` (a revoked token must fail on the next request).
 
+## File transfer (0.4.0) is a high-privilege capability
+
+`files` lets a peer read and write any file **inside the named roots this machine declared**, and
+nowhere else. It is off by default twice over: `files.enabled` must be set in the settings, and the
+token must carry the `files` bit, which pairing never grants. Absolute paths never cross the wire;
+segments are validated and every resolved path is re-checked with `realpath`, so `..`, drive
+letters, Windows device names and symlink escapes are refused. Bytes are staged in
+`<DSH_HOME>/lan-bridge/staging/`, verified against the declared SHA-256, and only then renamed into
+place. Each committed upload and completed read is audited. Treat a `files` token like shell access
+to those directories: issue it only to a machine you would let run commands there.
+
 ## Known, accepted limitations (not vulnerabilities)
 
 - **Plaintext HTTP is the default transport.** The panel refuses to expose a non-loopback address

@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.14", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.4.0", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -60,10 +60,15 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
     "tasks.list": true, "tasks.create": true, "tasks.update": true,
     "tasks.transfer": true, "tasks.adopt": true,
     "goal.get": true, "goal.set": true, "goal.clear": true, "goal.adopt": true,
-    "approval.list": true, "approval.answer": true
+    "approval.list": true, "approval.answer": true,
+    "files.roots": true, "files.stat": true, "files.list": true, "files.read": true,
+    "files.begin": true, "files.chunk": true, "files.commit": true, "files.abort": true
   },
+  "files": { "enabled": true, "maxFileBytes": 268435456, "chunkBytes": 262144,
+             "roots": [ { "name": "workspace", "writable": true } ] },
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
-             "allowPeersToCreateSessions": true }
+             "allowPeersToCreateSessions": true,
+             "maxFileBytes": 268435456, "chunkBytes": 262144, "fileTransfer": true }
 }
 ```
 
@@ -268,6 +273,55 @@ falls back to the local prompt when no answer arrives within `approvalRelayMs` (
 or the request is cancelled. The Host's own `never` policy is applied before any answerer
 runs, so it cannot be bypassed this way. Every remote decision is written to the audit log
 (`method: "approval.answer"`) before it is handed to the waterfall.
+
+### Files: `files.*` (0.4.0)
+
+File transfer is opt-in twice: the listening machine must enable `files` in its settings **and**
+the token must carry the `files` capability. Pairing never grants it, and roots are declared per
+machine — a peer can only reach directories the operator listed.
+
+The wire never carries an absolute path. A caller names a root and a POSIX-style relative path:
+
+```json
+{ "root": "workspace", "path": "docs/report.pdf" }
+```
+
+```json
+// files.roots  (read)
+{ "roots": [ { "name": "workspace", "writable": true, "maxBytes": 268435456 } ],
+  "chunkBytes": 262144, "maxFileBytes": 268435456 }
+
+// files.stat  (files)  { root, path, digest? }
+{ "size": 1024, "mtimeMs": 1765520000000, "isDirectory": false, "sha256": "…" }
+
+// files.list  (files)  { root, path }  — one level
+{ "entries": [ { "name": "docs", "isDirectory": true, "size": 0, "mtimeMs": 1765520000000 } ] }
+
+// files.read  (files)  { root, path, offset, length }
+{ "data": "<base64>", "eof": false, "size": 1024, "offset": 0 }
+
+// files.begin (files)  { root, path, size, sha256, overwrite?, createParents? }
+{ "uploadId": "…", "chunkBytes": 262144, "expiresAt": 1765520600000 }
+
+// files.chunk (files)  { uploadId, index, data }        → { "received": 524288 }
+// files.commit (files) { uploadId }                     → { "root": "workspace", "path": "docs/a.bin", "size": 1048576, "sha256": "…" }
+// files.abort (files)  { uploadId }                     → { "ok": true, "dropped": true }
+```
+
+Rules, in the order they are checked: capability → `files.enabled` → the root exists and (for
+writes) is `writable` → every path segment → the resolved parent still inside the root after
+`realpath` → the size limit. Rejected segments include `..`, `.`, empty, absolute paths, drive
+letters, backslashes, trailing dots/spaces, control characters, and Windows device names
+(`CON`, `NUL`, `COM1`…). Anything that resolves outside a root — including a symlink whose own
+name looks fine — is `bridge/forbidden`.
+
+`files.begin` fails fast: unknown root (`bridge/not-found`), oversized (`bridge/bad-request`), and
+an existing target without `overwrite: true` (`bridge/conflict`). Bytes are staged under
+`<stateDir>/staging/` and only renamed into place after the declared `sha256` matches; a crash or
+an `abort` leaves nothing behind, and a stale `*.part` older than `stagingTtlMs` is swept on the
+next start. One upload per peer at a time (`bridge/rate-limited`). Every committed upload and
+every completed read is written to the audit log with `direction`, `root`, `path`, `bytes` and
+`sha256`.
 
 ### `session.cancel` → params `{ sessionId }` → `{ "accepted": true }`
 

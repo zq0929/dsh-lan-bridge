@@ -60,15 +60,16 @@
 | `maxMessages` | 200 | 单次读历史条数上限 |
 | `rateLimitPerMinute` | 120 | 每 peer 每分钟请求上限 |
 
-### 面板里签发令牌时可以勾选全部六个能力位
+### 面板里签发令牌时可以勾选全部八个能力位
 
 **设置 → 局域网桥 → 对等端 → 配对新对等端** 下面有一排能力开关：`read` / `prompt` /
-`control` / `create` / `archive` / `collab`，默认只勾 `read` + `prompt`。
+`control` / `create` / `archive` / `collab` / `approve` / `files`，默认只勾 `read` + `prompt`。
 
 - 想让它能新建会话、归档、或者读写共享板，就在面板里勾上对应位——不必再退回
   `lan_dsh_peers action=pair` 命令；
 - `control`（取消/改名/换模型）、`create`（新建会话）、`archive`（归档/恢复）、`collab`
-  （共享任务板与目标文档）都会让对等端**改变本机状态**，勾之前想清楚它是不是你信任的那台；
+  （共享任务板与目标文档）、`approve`（代答审批）、`files`（在你声明的根目录里读写文件）
+  都会让对等端**改变本机状态**，勾之前想清楚它是不是你信任的那台；
 - 令牌仍然只显示一次、只存散列；勾错的代价是「撤销后重新签一枚」，所以宁可少勾；
 - 列表为空会被拒绝（一个什么都不能做的 token 没有意义），未知名字会被忽略。
 
@@ -136,7 +137,7 @@
 
 两个方向别混：**面板的“配对 peer”发的是入站 token**（别人来控我）；**出站**（我去控别人）只能在
 控制侧用 `lan_dsh_peers action=add` 加，把对方面板给的 URL+token 填进去。想给对方 `control`（取消/改名/
-切模型）或 `create`/`archive`/`collab`/`approve` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]（要代答审批再加 `"approve"`）`
+切模型）或 `create`/`archive`/`collab`/`approve`/`files` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]（要代答审批再加 `"approve"`）`
 在 A 上签发，再把 token 交给 B。
 
 ## 对端提示词
@@ -160,6 +161,9 @@
 | `lan_dsh_goal` | 读 / CAS 写 / 清空 / **双向收敛**共享目标文档（"什么叫做完"写在这里） |
 | `lan_dsh_wait` | 继续等一个还在跑的回合；可带 `afterSeq` 只读某个序号之后的新内容 |
 | `lan_dsh_cancel` | 打断 peer 当前回合 |
+| `lan_dsh_push_file` | 把一个本地文件推到 peer 的某个共享根下（分块 + sha256 校验；需要该 token 带 `files`，且目标根可写） |
+| `lan_dsh_pull_file` | 从 peer 的共享根拉一个文件到本机（先写临时文件，校验通过才改名） |
+| `lan_dsh_files` | 只读探查对端：`roots`（共享了哪些根、是否可写）/ `list` / `stat` |
 
 ## 安全模型（请照着读一遍）
 
@@ -171,9 +175,41 @@
    `X-DSH-Bridge: 1` 自定义头（浏览器要发它必须先过 preflight，而 OPTIONS 一律拒绝）+ `Host` 栅栏 +
    拒绝任何 `Origin`/`Sec-Fetch-Site`/`Sec-Fetch-Dest`，挡掉浏览器侧 CSRF 与 DNS rebinding。
 3. **会话**：peer 只看得到你勾了共享的会话；审批默认不代答（要代答必须显式签发 `approve` 能力，见下）。
+4. **文件**：默认完全关闭；开启后也只能碰你在面板里逐个声明的根目录，审批/文件各是一个独立能力位，
+   都要单独签发。绝对路径永不过线。
 
 **token 泄露 ≈ 把共享会话的执行权交出去**：共享会话里 agent 能跑 shell、改文件。所以：
 只共享你真的愿意让对端驱动的会话；用完 `unshare`；发现异常立刻面板吊销。
+
+### 文件传输（0.4.0 起，默认关闭）
+
+会话里说"把那个日志传给我"时，桥可以直接搬字节，不用你手敲 scp。两端各做两件事：
+
+**被控侧**（面板 → 局域网桥接 → 文件传输）：
+
+1. 打开「允许对端传输文件」；
+2. 加一个根目录，例如名称 `workspace`、路径 `D:\Users\me\Documents\dsh`，需要写入就打开「可写」；
+3. 保存；然后给对端的 token 勾上 `files`（或 `lan_dsh_peers action=grant name=b-mac capabilities=["read","prompt","files"]`）。
+
+**控制侧**：
+
+```bash
+lan_dsh_files  { peer: "b-mac", action: "roots" }                       # 先看它共享了哪些根
+lan_dsh_push_file { peer: "b-mac", localPath: "./report.pdf",
+                    root: "workspace", remotePath: "inbox/report.pdf" }
+lan_dsh_pull_file { peer: "b-mac", root: "workspace",
+                    remotePath: "out/app.log", localPath: "./app.log" }
+```
+
+规则：
+
+- 线上只传 `{ root, path }`，`path` 是 POSIX 风格相对路径；**绝对路径、盘符、`..`、Windows 设备名一律拒绝**，
+  解析后再用 `realpath` 复核，符号链接逃逸也是 `bridge/forbidden`。
+- 分块 base64（默认 256 KiB/块），`files.begin` 就先拒掉未知根、越界路径、超限大小、已存在的目标，
+  不会先把带宽浪费掉再报错。
+- 先落 `<DSH_HOME>/lan-bridge/staging/`，`sha256` 校验通过才 `rename` 到目标；`abort`、崩溃、过期都不会留下半截文件。
+- 每次提交与读完都写审计（`direction`/`root`/`path`/`bytes`/`sha256`）。
+- 同一 peer 同时只允许一个上传（`bridge/rate-limited`）；单文件上限默认 256 MiB，可在面板改。
 
 ### 跨机代答审批（0.3.13 起，默认关闭）
 
@@ -291,6 +327,8 @@ discovered over mDNS:
 ## 已知限制
 
 - **明文传输是默认形态**（TLS 需自签证书）；没有 token 轮换周期，只能吊销重建。
+- **文件传输不是通用网盘**：不做目录递归、断点续传、多文件批量（调用方循环）、也不做流式；
+  它只在你声明的根里搬单个文件，`files` 能力位等于"在该根内任意读写"，按高权能力对待。
 - **版本耦合**：映射的是 DSH 的 `sessionController`（尚属内部 API）。对端版本不同时，
   会返回 `bridge/method-unavailable` 而不是静默降级；跨版本用前先各自 `lan_dsh_peers check`。
 - **无跨机 subagent 谱系**：远端会话在它自己的机器上，不会出现在本机会话树里。

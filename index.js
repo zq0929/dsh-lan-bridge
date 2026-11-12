@@ -44,6 +44,17 @@ export function apply(ctx, config) {
   const server = createServer({ ctx, cfg, store, api, logger })
   const peerCache = createPeerCache()
 
+  // Stage cleanup is best effort and must never block the Host: a crashed run
+  // can leave half-written uploads, and they are useless after the TTL anyway.
+  ctx.effect(() => {
+    let stopped = false
+    void api.files.cleanup().catch((error) => logger?.warn?.(`lan-bridge: staging cleanup failed: ${String(error)}`))
+    return () => {
+      stopped = true
+      if (stopped) void api.files.close().catch(() => {})
+    }
+  }, 'lan-bridge: file staging')
+
   // Settings saved from the panel outlive the bundle row: they are stored in
   // `bridge.json` and win over `cordis.patch.yml`, so a host change made in the
   // UI survives a Host restart without anyone editing YAML.
@@ -123,6 +134,7 @@ export function apply(ctx, config) {
     `lan-bridge v${VERSION}: role=${cfg.role} name=${cfg.name} state=${cfg.stateDir} `
     + `listen=${cfg.listening ? `${cfg.hostname}:${String(cfg.port)}` : 'off'} `
     + `tools=${cfg.controlling ? 'on' : 'off'} create=${cfg.allowPeersToCreateSessions ? 'allowed' : 'refused'} `
-    + `discovery=${cfg.discovery.enabled ? 'on' : 'off'}`,
+    + `discovery=${cfg.discovery.enabled ? 'on' : 'off'} `
+    + `files=${cfg.files.enabled ? `${String(cfg.files.roots.length)} root(s)` : 'off'}`,
   )
 }

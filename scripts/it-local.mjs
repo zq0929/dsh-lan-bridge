@@ -12,7 +12,8 @@
  *
  * Exit code 0 = every assertion passed.
  */
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { adoptGoal, emptyBoard } from '../lib/board.js'
@@ -281,6 +282,16 @@ ctx.provide('workspaceController', {
   },
 })
 
+// File transfer needs real directories to stand in for the operator's roots:
+// one writable, one read-only, and one that is deliberately outside the root so
+// a symlink escape can be attempted.
+const filesRoot = await mkdtemp(join(tmpdir(), 'lan-bridge-drop-'))
+const outsideRoot = await mkdtemp(join(tmpdir(), 'lan-bridge-outside-'))
+await mkdir(join(filesRoot, 'docs'), { recursive: true })
+await writeFile(join(filesRoot, 'docs', 'hello.txt'), 'hello from the harness\n')
+await writeFile(join(outsideRoot, 'secret.txt'), 'must never cross the fence\n')
+await symlink(join(outsideRoot, 'secret.txt'), join(filesRoot, 'escape.txt'))
+
 const cfg = resolveConfig({
   role: 'both',
   name: 'it-machine',
@@ -289,6 +300,15 @@ const cfg = resolveConfig({
   allowPeersToCreateSessions: false,
   rateLimitPerMinute: 600,
   audit: true,
+  files: {
+    enabled: true,
+    maxFileBytes: 8 * 1024 * 1024,
+    chunkBytes: 64 * 1024,
+    roots: [
+      { name: 'drop', path: filesRoot, writable: true },
+      { name: 'readonly', path: outsideRoot, writable: false },
+    ],
+  },
 }, { DSH_HOME: stateDir })
 cfg.stateDir = stateDir
 
@@ -759,8 +779,8 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 {
   steps.push('')
   steps.push('tools')
-  equal('twelve tools registered', tools.size, 12)
-  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal', 'lan_dsh_approval']) {
+  equal('fifteen tools registered', tools.size, 15)
+  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal', 'lan_dsh_approval', 'lan_dsh_push_file', 'lan_dsh_pull_file', 'lan_dsh_files']) {
     check(`tool ${name} present`, tools.has(name))
   }
   const exec = async (name, args) => tools.get(name).execute(args, { signal: undefined })
@@ -983,7 +1003,7 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
     })
     return { status: response.status, body: await response.json() }
   }
-  const allCaps = ['read', 'prompt', 'control', 'create', 'archive', 'collab']
+  const allCaps = ['read', 'prompt', 'control', 'create', 'archive', 'collab', 'approve', 'files']
   // Each side mints the credential the other one presents.
   const handToken = (await store.pair({ name: 'hand-peer', capabilities: allCaps })).token
   const peerToken = (await peerStore.pair({ name: 'it-machine', capabilities: allCaps })).token
@@ -1237,7 +1257,7 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 
   // The panel may mint any subset the Host knows, so an operator never has to
   // fall back to a pair command to get collab or control.
-  const allCaps = ['read', 'prompt', 'control', 'create', 'archive', 'collab']
+  const allCaps = ['read', 'prompt', 'control', 'create', 'archive', 'collab', 'approve', 'files']
   const everything = await uiCall('pair', { name: 'it-ui-everything', capabilities: allCaps })
   equal('panel can issue a token with every capability', everything.ok, true)
   equal('that token carries exactly those capabilities', JSON.stringify(everything.capabilities), JSON.stringify(allCaps))
@@ -1549,6 +1569,158 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   await store.setShared('session-ws-a2', false)
 }
 
+// --- files ---------------------------------------------------------------
+{
+  steps.push('')
+  steps.push('files')
+  const filesUrl = `http://127.0.0.1:${String(server.status.port)}`
+  const filesToken = (await store.pair({ name: 'files-peer', capabilities: ['read', 'prompt', 'files'] })).token
+  const readerToken = (await store.pair({ name: 'files-reader', capabilities: ['read'] })).token
+  const filesRpc = async (method, params, token = filesToken) => {
+    const response = await fetch(`${filesUrl}/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id: 'it', method, params }),
+    })
+    return response.json()
+  }
+  const filesOk = async (method, params, token) => {
+    const body = await filesRpc(method, params, token)
+    if (body.ok !== true) throw new Error(`${method} failed: ${JSON.stringify(body.error)}`)
+    return body.result
+  }
+  const filesFail = async (method, params, code, token) => {
+    const body = await filesRpc(method, params, token)
+    equal(`${method} refused`, body.ok, false)
+    equal(`${method} error code`, body.error?.code, code)
+    return body.error
+  }
+
+  // roots: names and writability only. A local absolute path must never cross.
+  const viewerRoots = await filesOk('files.roots', {}, readerToken)
+  equal('roots readable with only the read bit', viewerRoots.roots.map(root => root.name).join(','), 'drop,readonly')
+  const rootsJson = JSON.stringify(viewerRoots)
+  check('roots never leak a local path', !rootsJson.includes(filesRoot) && !rootsJson.includes(outsideRoot), rootsJson.slice(0, 160))
+  equal('root writability is reported', viewerRoots.roots.find(root => root.name === 'drop').writable, true)
+
+  // stat / list on the happy path.
+  const hello = await filesOk('files.stat', { root: 'drop', path: 'docs/hello.txt', digest: true })
+  equal('stat reports the size', hello.size, Buffer.byteLength('hello from the harness\n'))
+  equal('stat reports a digest', /^[0-9a-f]{64}$/.test(String(hello.sha256)), true)
+  const listing = await filesOk('files.list', { root: 'drop', path: 'docs' })
+  equal('list names the entry', listing.entries.map(entry => entry.name).join(','), 'hello.txt')
+  equal('list marks a file as a file', listing.entries[0].isDirectory, false)
+
+  // Path discipline: every one of these must be refused before the disk is touched.
+  await filesFail('files.stat', { root: 'drop', path: '../outside.txt' }, 'bridge/forbidden')
+  await filesFail('files.stat', { root: 'drop', path: '/etc/passwd' }, 'bridge/forbidden')
+  await filesFail('files.stat', { root: 'drop', path: 'C:/Windows/win.ini' }, 'bridge/forbidden')
+  await filesFail('files.stat', { root: 'drop', path: 'docs\\hello.txt' }, 'bridge/forbidden')
+  await filesFail('files.stat', { root: 'drop', path: 'nul' }, 'bridge/forbidden')
+  await filesFail('files.stat', { root: 'drop', path: 'docs/hello.txt.' }, 'bridge/forbidden')
+  await filesFail('files.stat', { root: 'nope', path: 'x.txt' }, 'bridge/not-found')
+  // A symlink that points outside the root resolves outside it, so it is refused
+  // even though its own name looks innocent.
+  await filesFail('files.stat', { root: 'drop', path: 'escape.txt' }, 'bridge/forbidden')
+
+  // Capability gating: read alone cannot touch files at all.
+  await filesFail('files.stat', { root: 'drop', path: 'docs/hello.txt' }, 'bridge/forbidden', readerToken)
+  await filesFail('files.read', { root: 'drop', path: 'docs/hello.txt', offset: 0, length: 8 }, 'bridge/forbidden', readerToken)
+
+  // read: chunks with an eof marker, base64 on the wire.
+  const first = await filesOk('files.read', { root: 'drop', path: 'docs/hello.txt', offset: 0, length: 5 })
+  equal('read returns the requested slice', Buffer.from(first.data, 'base64').toString(), 'hello')
+  equal('read says it is not the end yet', first.eof, false)
+  const last = await filesOk('files.read', { root: 'drop', path: 'docs/hello.txt', offset: 6, length: 4096 })
+  equal('read the rest', Buffer.from(last.data, 'base64').toString(), 'from the harness\n')
+  equal('read reports eof at the end', last.eof, true)
+
+  // Upload: fail fast on the things that would waste a transfer.
+  const source = Buffer.alloc(3 * 1024 * 1024)
+  for (let index = 0; index < source.length; index += 1) source[index] = index % 251
+  const sourceDigest = createHash('sha256').update(source).digest('hex')
+  const tooBig = await filesRpc('files.begin', { root: 'drop', path: 'docs/big.bin', size: cfg.files.maxFileBytes + 1, sha256: sourceDigest })
+  equal('oversized upload refused', tooBig.error?.code, 'bridge/bad-request')
+  const badDigest = await filesRpc('files.begin', { root: 'drop', path: 'docs/big.bin', size: 3, sha256: 'nope' })
+  equal('bad digest refused', badDigest.error?.code, 'bridge/bad-request')
+  const readOnlyRoot = await filesRpc('files.begin', { root: 'readonly', path: 'x.txt', size: 3, sha256: sourceDigest })
+  equal('write into a read-only root refused', readOnlyRoot.error?.code, 'bridge/forbidden')
+  const clash = await filesRpc('files.begin', { root: 'drop', path: 'docs/hello.txt', size: 3, sha256: sourceDigest })
+  equal('existing target without overwrite refused', clash.error?.code, 'bridge/conflict')
+
+  const upload = await filesOk('files.begin', { root: 'drop', path: 'docs/uploaded.bin', size: source.length, sha256: sourceDigest })
+  check('begin returns an upload id', typeof upload.uploadId === 'string', String(upload.uploadId))
+  equal('begin reports the chunk size', upload.chunkBytes, cfg.files.chunkBytes)
+  const outOfOrder = await filesRpc('files.chunk', { uploadId: upload.uploadId, index: 3, data: 'AAAA' })
+  equal('out-of-order chunk refused', outOfOrder.error?.code, 'bridge/bad-request')
+  let offset = 0
+  let chunkIndex = 0
+  while (offset < source.length) {
+    const slice = source.subarray(offset, Math.min(offset + upload.chunkBytes, source.length))
+    const sent = await filesOk('files.chunk', { uploadId: upload.uploadId, index: chunkIndex, data: slice.toString('base64') })
+    offset += slice.length
+    chunkIndex += 1
+    if (offset >= source.length) equal('chunk reports the running total', sent.received, source.length)
+  }
+  const committed = await filesOk('files.commit', { uploadId: upload.uploadId })
+  equal('commit returns the digest it verified', committed.sha256, sourceDigest)
+  const stored = await filesOk('files.stat', { root: 'drop', path: 'docs/uploaded.bin', digest: true })
+  equal('stored file has the source digest', stored.sha256, sourceDigest)
+  equal('stored file has the source size', stored.size, source.length)
+
+  // abort: nothing is left behind, and the staging area goes quiet.
+  const aborted = await filesOk('files.begin', { root: 'drop', path: 'docs/aborted.bin', size: 10, sha256: sourceDigest })
+  await filesOk('files.abort', { uploadId: aborted.uploadId })
+  equal('abort drops the upload', api.files.pending(), 0)
+  const staging = await readdir(join(stateDir, 'staging'))
+  equal('abort removed the staged file', staging.filter(name => name.endsWith('.part')).length, 0)
+  const afterAbort = await filesRpc('files.chunk', { uploadId: aborted.uploadId, index: 0, data: 'AAAA' }, filesToken)
+  equal('a late chunk after abort is refused', afterAbort.error?.code, 'bridge/not-found')
+
+  // TTL cleanup: a crash leaves *.part files; the next start sweeps them.
+  await mkdir(join(stateDir, 'staging'), { recursive: true })
+  const stale = join(stateDir, 'staging', 'stale.part')
+  await writeFile(stale, 'x')
+  const longAgo = new Date(Date.now() - cfg.files.stagingTtlMs - 60_000)
+  await utimes(stale, longAgo, longAgo)
+  await api.files.cleanup()
+  const swept = await readdir(join(stateDir, 'staging')).catch(() => [])
+  check('cleanup swept the stale staging file', !swept.includes('stale.part'), JSON.stringify(swept))
+
+  // Tools: push, probe and pull through the real outbound client.
+  const localDir = await mkdtemp(join(tmpdir(), 'lan-bridge-local-'))
+  const textPath = join(localDir, 'note.txt')
+  await writeFile(textPath, 'pushed through the tool\n')
+  const binPath = join(localDir, 'blob.bin')
+  await writeFile(binPath, source)
+  await store.addOutbound({ name: 'self-files', url: filesUrl, token: filesToken })
+  const execTool = async (name, args) => tools.get(name).execute(args, { signal: undefined })
+  const toolRoots = await execTool('lan_dsh_files', { peer: 'self-files', action: 'roots' })
+  equal('tool lists root names', toolRoots.roots.map(root => root.name).join(','), 'drop,readonly')
+  check('tool roots stay path-free', !JSON.stringify(toolRoots).includes(filesRoot), JSON.stringify(toolRoots).slice(0, 160))
+  const pushedText = await execTool('lan_dsh_push_file', { peer: 'self-files', localPath: textPath, root: 'drop', remotePath: 'docs/note.txt' })
+  equal('tool push reports bytes', pushedText.bytes, Buffer.byteLength('pushed through the tool\n'))
+  const pushedBin = await execTool('lan_dsh_push_file', { peer: 'self-files', localPath: binPath, root: 'drop', remotePath: 'docs/blob.bin' })
+  equal('tool push of a 3 MiB binary matches the digest', pushedBin.sha256, sourceDigest)
+  const pullPath = join(localDir, 'pulled.bin')
+  const pulled = await execTool('lan_dsh_pull_file', { peer: 'self-files', root: 'drop', remotePath: 'docs/blob.bin', localPath: pullPath })
+  equal('tool pull reports the digest', pulled.sha256, sourceDigest)
+  const pulledBytes = await readFile(pullPath)
+  equal('pulled bytes match byte for byte', pulledBytes.equals(source), true)
+  const pullAgain = await execTool('lan_dsh_pull_file', { peer: 'self-files', root: 'drop', remotePath: 'docs/blob.bin', localPath: pullPath }).then(() => undefined, error => error)
+  check('pull without overwrite refuses an existing local file', pullAgain instanceof Error && String(pullAgain.message).includes('already exists'), String(pullAgain))
+  const listedTool = await execTool('lan_dsh_files', { peer: 'self-files', action: 'list', root: 'drop', path: 'docs' })
+  check('tool list sees the pushed file', listedTool.entries.some(entry => entry.name === 'note.txt'), JSON.stringify(listedTool.entries.map(entry => entry.name)))
+  const statTool = await execTool('lan_dsh_files', { peer: 'self-files', action: 'stat', root: 'drop', path: 'docs/note.txt' })
+  equal('tool stat reports the size', statTool.entry.size, Buffer.byteLength('pushed through the tool\n'))
+  const pushForbidden = await execTool('lan_dsh_push_file', { peer: 'self-files', localPath: textPath, root: 'readonly', remotePath: 'nope.txt' }).then(() => undefined, error => error)
+  check('tool push into a read-only root explains the grant', pushForbidden instanceof Error && String(pushForbidden.message).includes('files'), String(pushForbidden))
+  await store.removeOutbound('self-files')
+  await store.revoke('files-peer')
+  await store.revoke('files-reader')
+  await rm(localDir, { recursive: true, force: true })
+}
+
 // --- audit ---------------------------------------------------------------
 {
   steps.push('')
@@ -1564,6 +1736,8 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 await ctx.dispose()
 await server.stop()
 await rm(stateDir, { recursive: true, force: true })
+await rm(filesRoot, { recursive: true, force: true })
+await rm(outsideRoot, { recursive: true, force: true })
 
 console.log(steps.join('\n'))
 console.log('')

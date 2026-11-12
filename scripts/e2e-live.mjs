@@ -141,6 +141,17 @@ if (relaysApprovals) {
 } else {
   console.log(`  note the running Host (${String(hello.version)}) predates approval relay; restart it to check`)
 }
+// 0.4.0 advertises the file limits. A Host still running 0.3.x answers without
+// them, which is a note (restart), not a regression.
+const advertisesFiles = hello.capabilities?.['files.roots'] === true
+if (advertisesFiles) {
+  ok('advertises files.roots', true)
+  ok('advertises files.begin', hello.capabilities?.['files.begin'] === true)
+  ok('reports the file size limit', typeof hello.limits?.maxFileBytes === 'number' && hello.limits.maxFileBytes > 0, hello.limits)
+  ok('reports the chunk size', typeof hello.limits?.chunkBytes === 'number' && hello.limits.chunkBytes > 0, hello.limits)
+} else {
+  console.log(`  note the running Host (${String(hello.version)}) predates file transfer; restart it to check`)
+}
 if (hello.limits?.allowPeersToCreateSessions === undefined) {
   console.log('  note hello.limits predates allowPeersToCreateSessions; restart the Host to expose it')
 } else {

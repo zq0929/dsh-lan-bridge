@@ -130,6 +130,7 @@ window.__ModuleLoader__.load({
         capApprove: '代答审批',
         capRename: '重命名',
         capSelectModel: '切换模型',
+        capFiles: '文件传输',
         cancel: '取消',
         settingsTitle: '监听设置',
         settingsHint: '改这里就等于改监听配置：保存后立即重建监听器，不需要改 cordis.patch.yml，也不需要重启 Host。',
@@ -195,6 +196,29 @@ window.__ModuleLoader__.load({
         wsEmpty: '暂无会话',
         wsEmptyNext: '共享此工作区后，新建会话将自动共享。',
         wsOther: '其他会话',
+        filesTitle: '文件传输',
+        filesHint: '对端可以在你勾选为可写的根目录里读写文件；路径只在本机生效，不会发给对端。',
+        filesPostureOn: '已开启',
+        filesPostureOff: '已关闭',
+        filesRootsCount: '{count} 个根目录',
+        filesLimit: '单文件上限 {mib} MiB',
+        filesEnabled: '允许对端传输文件',
+        filesEnabledHint: '关闭后对端的文件能力立即失效，已签发的令牌仍然保留。',
+        filesMax: '单文件上限（MiB）',
+        filesMaxHint: '按 MiB 填写，保存时换算成字节；Host 只接受整数。',
+        filesRoots: '根目录',
+        filesRootsHint: '每个根目录给对端一个名字；可写表示允许写入，否则只读。',
+        filesRootName: '名称',
+        filesRootPath: '路径',
+        filesRootWritable: '可写',
+        filesRootWritableHint: '允许写入此根目录',
+        filesRootRemove: '删除',
+        filesRootAdd: '新增根目录',
+        filesNoRoots: '还没有根目录：对端看不到任何可读写的目录',
+        filesRootNameInvalid: '名称只能是 32 个字符以内的小写字母、数字、下划线或短横线，且以字母或数字开头。',
+        filesRootNameDuplicate: '根目录名称必须唯一。',
+        filesRootPathMissing: '路径不能为空。',
+        filesMaxInvalid: '单文件上限必须是 1 到 4096 之间的整数 MiB。',
         wsShareAll: '共享整个工作区',
         wsShareFailed: '工作区共享切换失败',
         wsExpandAll: '全部展开',
@@ -268,6 +292,7 @@ window.__ModuleLoader__.load({
         capApprove: 'approvals',
         capRename: 'rename',
         capSelectModel: 'select model',
+        capFiles: 'files',
         cancel: 'Cancel',
         settingsTitle: 'Listener',
         settingsHint: 'This is the listener itself: saving rebuilds it immediately, with no edit to cordis.patch.yml and no Host restart.',
@@ -333,6 +358,29 @@ window.__ModuleLoader__.load({
         wsEmpty: 'No sessions yet',
         wsEmptyNext: 'Share this workspace and new sessions in it are shared automatically.',
         wsOther: 'Other sessions',
+        filesTitle: 'File transfer',
+        filesHint: 'Peers can read and write inside the roots you mark writable; local paths never leave this machine.',
+        filesPostureOn: 'On',
+        filesPostureOff: 'Off',
+        filesRootsCount: '{count} roots',
+        filesLimit: 'max {mib} MiB per file',
+        filesEnabled: 'Allow peers to transfer files',
+        filesEnabledHint: 'Turning this off drops the file capability immediately; issued tokens stay.',
+        filesMax: 'Max file size (MiB)',
+        filesMaxHint: 'Entered in MiB and converted to bytes on save; the Host accepts integers only.',
+        filesRoots: 'Roots',
+        filesRootsHint: 'Each root gives peers a name; writable allows writes, otherwise it is read-only.',
+        filesRootName: 'Name',
+        filesRootPath: 'Path',
+        filesRootWritable: 'Writable',
+        filesRootWritableHint: 'Allow writes in this root',
+        filesRootRemove: 'Remove',
+        filesRootAdd: 'Add a root',
+        filesNoRoots: 'No roots yet: peers cannot see any readable or writable directory',
+        filesRootNameInvalid: 'A name is up to 32 lowercase letters, digits, underscores or dashes, starting with a letter or digit.',
+        filesRootNameDuplicate: 'Root names must be unique.',
+        filesRootPathMissing: 'The path cannot be empty.',
+        filesMaxInvalid: 'Max file size must be an integer between 1 and 4096 MiB.',
         wsShareAll: 'Share the whole workspace',
         wsShareFailed: 'Workspace sharing failed',
         wsExpandAll: 'Expand all',
@@ -522,6 +570,18 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-primary,#1f2329)}',
       '.dslb-linkBtn:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
       'outline-offset:1px}',
+      '.dslb-cardPosture{margin:0;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-secondary,#5b6270);overflow-wrap:anywhere}',
+      '.dslb-roots{display:flex;flex-direction:column;min-width:0}',
+      '.dslb-rootRow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.7fr) auto auto;',
+      'gap:10px 12px;align-items:end;min-width:0;padding:10px 0}',
+      '.dslb-rootRow+.dslb-rootRow{border-top:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2))}',
+      '.dslb-rootWritable{display:flex;flex-direction:column;gap:6px;align-items:flex-start;min-width:0}',
+      '.dslb-rootActions{display:flex;align-items:flex-end;min-width:0;padding-bottom:1px}',
+      '.dslb-rootFoot{display:flex;align-items:center;justify-content:flex-start;gap:12px;flex-wrap:wrap}',
+      '.dslb-formError{margin:2px 0 0;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-state-error-primary,#ec1313)}',
+      '.dslb-inputMono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}',
       '.dslb-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}',
       '.dslb-title{display:flex;align-items:center;gap:8px;min-width:0;font-size:14px;line-height:20px}',
       '.dslb-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -625,6 +685,18 @@ window.__ModuleLoader__.load({
       const port = typeof settings.port === 'number' && Number.isFinite(settings.port)
         ? settings.port
         : (typeof listen.port === 'number' && Number.isFinite(listen.port) ? listen.port : null)
+      const files = record(settings.files)
+      const fileRoots = list(files === null ? null : files.roots).map((entry) => {
+        const fileRoot = record(entry)
+        if (fileRoot === null) return null
+        const fileRootName = text(fileRoot.name, '')
+        if (fileRootName === '') return null
+        return {
+          name: fileRootName,
+          path: text(fileRoot.path, ''),
+          writable: fileRoot.writable === true,
+        }
+      }).filter((fileRoot) => fileRoot !== null)
       return {
         name: text(settings.name, text(record(root).name, '')),
         host: text(settings.host, text(listen.host, '')),
@@ -634,7 +706,71 @@ window.__ModuleLoader__.load({
         trustedHosts: list(settings.trustedHosts).map((value) => text(value, '')).filter((value) => value !== ''),
         tls: tls === null ? null : { certFile: text(tls.certFile, ''), keyFile: text(tls.keyFile, '') },
         discovery: settings.discovery === true,
+        // Absent on an older Host: off, no roots, and the documented 256 MiB
+        // default. That is a quiet state, never an error; a save fills it in.
+        files: {
+          enabled: files !== null && files.enabled === true,
+          maxFileBytes: files !== null && typeof files.maxFileBytes === 'number' && Number.isFinite(files.maxFileBytes)
+            ? files.maxFileBytes
+            : 0,
+          chunkBytes: files !== null && typeof files.chunkBytes === 'number' && Number.isFinite(files.chunkBytes)
+            ? files.chunkBytes
+            : 0,
+          stagingTtlMs: files !== null && typeof files.stagingTtlMs === 'number' && Number.isFinite(files.stagingTtlMs)
+            ? files.stagingTtlMs
+            : 0,
+          roots: fileRoots,
+        },
       }
+    }
+
+    /** What the form shows before the first read: the Host defaults. */
+    const EMPTY_SETTINGS = {
+      name: '',
+      host: '',
+      port: null,
+      insecureHttp: false,
+      allowPeersToCreateSessions: true,
+      trustedHosts: [],
+      tls: null,
+      discovery: false,
+      files: { enabled: false, maxFileBytes: 0, chunkBytes: 0, stagingTtlMs: 0, roots: [] },
+    }
+
+    /** One root name rule, mirrored from the Host: 1-32 of [a-z0-9_-]. */
+    const FILE_ROOT_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/i
+
+    /** MiB as the form shows it, from the bytes the Host stores. */
+    function mibFromBytes(bytes) {
+      if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '256'
+      const mib = bytes / 1048576
+      return String(Math.round(mib * 100) / 100)
+    }
+
+    /** The operator payload for the files block: MiB back to bytes. */
+    function filesPayload(files) {
+      const mib = Number(files.maxMiB)
+      return {
+        enabled: files.enabled === true,
+        maxFileBytes: Number.isFinite(mib) ? Math.round(mib * 1048576) : 0,
+        roots: files.roots.map((root) => ({
+          name: root.name.trim(),
+          path: root.path.trim(),
+          writable: root.writable === true,
+        })),
+      }
+    }
+
+    function sameFiles(left, right) {
+      if (left.enabled !== right.enabled) return false
+      if (left.maxMiB !== right.maxMiB) return false
+      if (left.roots.length !== right.roots.length) return false
+      for (let index = 0; index < left.roots.length; index += 1) {
+        const a = left.roots[index]
+        const b = right.roots[index]
+        if (a.name !== b.name || a.path !== b.path || a.writable !== b.writable) return false
+      }
+      return true
     }
 
     /** One session item, wherever it is listed (flat list or inside a workspace). */
@@ -835,6 +971,7 @@ window.__ModuleLoader__.load({
       if (capability === 'approve') return t('capApprove')
       if (capability === 'rename') return t('capRename')
       if (capability === 'selectModel') return t('capSelectModel')
+      if (capability === 'files') return t('capFiles')
       return capability
     }
 
@@ -843,7 +980,7 @@ window.__ModuleLoader__.load({
      * Mirrors CAPABILITIES in lib/config.js; the Host stays the authority and
      * drops names it does not know.
      */
-    const PAIR_CAPABILITIES = ['read', 'prompt', 'control', 'create', 'archive', 'collab', 'approve']
+    const PAIR_CAPABILITIES = ['read', 'prompt', 'control', 'create', 'archive', 'collab', 'approve', 'files']
 
     /** What a fresh token gets when the operator changes nothing. */
     const DEFAULT_PAIR_CAPABILITIES = ['read', 'prompt']
@@ -897,6 +1034,15 @@ window.__ModuleLoader__.load({
         certFile: tls === null ? '' : tls.certFile,
         keyFile: tls === null ? '' : tls.keyFile,
         discovery: settings.discovery === true,
+        files: {
+          enabled: settings.files.enabled === true,
+          maxMiB: mibFromBytes(settings.files.maxFileBytes),
+          roots: settings.files.roots.map((root) => ({
+            name: root.name,
+            path: root.path,
+            writable: root.writable === true,
+          })),
+        },
       }
     }
 
@@ -911,6 +1057,7 @@ window.__ModuleLoader__.load({
         && left.certFile === right.certFile
         && left.keyFile === right.keyFile
         && left.discovery === right.discovery
+        && sameFiles(left.files, right.files)
     }
 
     /** A stable key for one settings block, so a poll does not churn the form. */
@@ -926,6 +1073,11 @@ window.__ModuleLoader__.load({
         tls === null ? '' : tls.certFile,
         tls === null ? '' : tls.keyFile,
         settings.discovery === true ? '1' : '0',
+        settings.files.enabled ? '1' : '0',
+        String(settings.files.maxFileBytes),
+        settings.files.roots
+          .map((root) => `${root.name}\u0001${root.path}\u0001${root.writable ? '1' : '0'}`)
+          .join('\u0001'),
       ].join('\u0000')
     }
 
@@ -1195,9 +1347,16 @@ window.__ModuleLoader__.load({
      * all-or-nothing; the port is 0-65535), so a save the Host would refuse is
      * usually never sent, and any refusal that does arrive is shown verbatim.
      */
-    function ListenSettings(props) {
+    /**
+     * One form state for the whole settings page: the listener and the files
+     * blocks are saved by the same POST, so they must share one draft, one
+     * dirty flag and one save bar.
+     */
+    function useSettingsForm(props) {
       const { data, t, applyState } = props
-      const settings = data.settings
+      const settings = data === null ? EMPTY_SETTINGS : data.settings
+      const listen = data === null ? { listening: false, port: null, host: '' } : data.listen
+      const addresses = data === null ? [] : data.addresses
       const initial = draftFromSettings(settings)
       const [draft, setDraft] = React.useState(initial)
       const [baseline, setBaseline] = React.useState(initial)
@@ -1264,6 +1423,71 @@ window.__ModuleLoader__.load({
       const nameLiveChanged = name !== baseline.name.trim() && name !== ''
       const canSave = dirty && problem === '' && !saving
 
+      const updateFiles = (patch) => {
+        setFailure(null)
+        setSaved(false)
+        setDraft((previous) => ({ ...previous, files: { ...previous.files, ...patch } }))
+      }
+
+      const updateRoot = (index, patch) => {
+        setFailure(null)
+        setSaved(false)
+        setDraft((previous) => ({
+          ...previous,
+          files: {
+            ...previous.files,
+            roots: previous.files.roots.map((root, at) => (at === index ? { ...root, ...patch } : root)),
+          },
+        }))
+      }
+
+      const addRoot = () => {
+        setFailure(null)
+        setSaved(false)
+        setDraft((previous) => ({
+          ...previous,
+          files: {
+            ...previous.files,
+            roots: previous.files.roots.concat([{ name: '', path: '', writable: false }]),
+          },
+        }))
+      }
+
+      const removeRoot = (index) => {
+        setFailure(null)
+        setSaved(false)
+        setDraft((previous) => ({
+          ...previous,
+          files: {
+            ...previous.files,
+            roots: previous.files.roots.filter((root, at) => at !== index),
+          },
+        }))
+      }
+
+      // Files validation is advisory only: the server is the source of truth
+      // and its sentence is what reaches the operator, so these never disable
+      // the save button — they just sit under the field they explain.
+      const fileRootErrors = (() => {
+        const seen = {}
+        return draft.files.roots.map((root) => {
+          const rootName = root.name.trim()
+          const key = rootName.toLowerCase()
+          let nameError = ''
+          if (rootName !== '' && !FILE_ROOT_NAME.test(rootName)) nameError = 'filesRootNameInvalid'
+          else if (rootName !== '' && seen[key] === true) nameError = 'filesRootNameDuplicate'
+          if (rootName !== '') seen[key] = true
+          return {
+            name: nameError,
+            path: root.path.trim() === '' ? 'filesRootPathMissing' : '',
+          }
+        })
+      })()
+      const filesMaxText = draft.files.maxMiB.trim()
+      const filesMaxNumber = /^\d+$/.test(filesMaxText) ? Number(filesMaxText) : NaN
+      const filesMaxValid = Number.isInteger(filesMaxNumber) && filesMaxNumber >= 1 && filesMaxNumber <= 4096
+      const filesOpen = draft.files.enabled === true
+
       const save = () => {
         if (saving || problem !== '' || !dirty) return
         const payload = {
@@ -1275,6 +1499,7 @@ window.__ModuleLoader__.load({
           allowPeersToCreateSessions: draft.allowPeersToCreateSessions,
           trustedHosts: parseTrustedHosts(draft.trustedHosts),
           tls: tlsPresent ? { certFile, keyFile } : null,
+          files: filesPayload(draft.files),
         }
         setSaving(true)
         setFailure(null)
@@ -1306,13 +1531,92 @@ window.__ModuleLoader__.load({
       }
 
       const hostChoices = []
-      for (const candidate of ['127.0.0.1', '0.0.0.0'].concat(data.addresses)) {
+      for (const candidate of ['127.0.0.1', '0.0.0.0'].concat(addresses)) {
         if (candidate === '' || hostChoices.indexOf(candidate) !== -1) continue
         hostChoices.push(candidate)
       }
-      const assigned = data.listen.listening === true ? data.listen.port : ''
+      const assigned = listen.listening === true ? listen.port : ''
       const showAssigned = settings.port === 0 && assigned !== ''
       const assignedDraft = draft.port.trim() === '0' && assigned !== ''
+
+
+      return {
+        settings,
+        draft,
+        saving,
+        failure,
+        saved,
+        update,
+        updateFiles,
+        updateRoot,
+        addRoot,
+        removeRoot,
+        name,
+        host,
+        portText,
+        portNumber,
+        portValid,
+        certFile,
+        keyFile,
+        tlsHalf,
+        tlsPresent,
+        hostMissing,
+        outward,
+        insecureWarn,
+        nameMissing,
+        nameTooLong,
+        problem,
+        dirty,
+        listenChanged,
+        nameLiveChanged,
+        canSave,
+        hostChoices,
+        assigned,
+        showAssigned,
+        assignedDraft,
+        fileRootErrors,
+        filesMaxValid,
+        filesMaxNumber,
+        filesOpen,
+        clearFailure: () => setFailure(null),
+        save,
+      }
+    }
+
+    function ListenSettings(props) {
+      const { data, t } = props
+      const form = props.form
+      const settings = form.settings
+      const draft = form.draft
+      const saving = form.saving
+      const failure = form.failure
+      const saved = form.saved
+      const update = form.update
+      const name = form.name
+      const host = form.host
+      const portText = form.portText
+      const portNumber = form.portNumber
+      const portValid = form.portValid
+      const certFile = form.certFile
+      const keyFile = form.keyFile
+      const tlsHalf = form.tlsHalf
+      const tlsPresent = form.tlsPresent
+      const hostMissing = form.hostMissing
+      const outward = form.outward
+      const insecureWarn = form.insecureWarn
+      const nameMissing = form.nameMissing
+      const nameTooLong = form.nameTooLong
+      const problem = form.problem
+      const dirty = form.dirty
+      const listenChanged = form.listenChanged
+      const nameLiveChanged = form.nameLiveChanged
+      const canSave = form.canSave
+      const hostChoices = form.hostChoices
+      const assigned = form.assigned
+      const showAssigned = form.showAssigned
+      const assignedDraft = form.assignedDraft
+      const save = form.save
+      const clearFailure = form.clearFailure
 
       // 2. The listener card. Every rule the Host enforces is mirrored inline,
       // but only the three that make a save meaningless (no name, no address, a
@@ -1470,7 +1774,7 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button',
               className: 'dslb-btn',
-              onClick: () => setFailure(null),
+              onClick: clearFailure,
             }, t('dismiss'))),
 
         h('div', { className: 'dslb-saveBar' },
@@ -1487,6 +1791,137 @@ window.__ModuleLoader__.load({
             title: canSave ? undefined : t('settingsSaveBlocked'),
             onClick: save,
           }, saving ? t('settingsSaving') : t('settingsSave'))))
+    }
+
+    /**
+     * One root row: a peer-visible name, the local absolute path (mono, because
+     * it is a path) and whether writes are allowed. The path is never sent to a
+     * peer; this row is the operator view.
+     */
+    function FileRootRow(props) {
+      const { index, root, errors, disabled, t, onUpdate, onRemove } = props
+      const position = index + 1
+      return h('div', { className: 'dslb-rootRow' },
+        h('label', { className: 'dslb-formField' },
+          h('span', { className: 'dslb-formLabel' }, t('filesRootName')),
+          h('input', {
+            className: 'dslb-input',
+            value: root.name,
+            spellCheck: false,
+            disabled,
+            'aria-label': `${t('filesRootName')} ${position}`,
+            onChange: (event) => onUpdate(index, { name: event.currentTarget.value }),
+          }),
+          errors.name === '' ? null : h('span', { className: 'dslb-formError' }, t(errors.name))),
+        h('label', { className: 'dslb-formField' },
+          h('span', { className: 'dslb-formLabel' }, t('filesRootPath')),
+          h('input', {
+            className: 'dslb-input dslb-inputMono',
+            value: root.path,
+            spellCheck: false,
+            disabled,
+            'aria-label': `${t('filesRootPath')} ${position}`,
+            onChange: (event) => onUpdate(index, { path: event.currentTarget.value }),
+          }),
+          errors.path === '' ? null : h('span', { className: 'dslb-formError' }, t(errors.path))),
+        h('div', { className: 'dslb-rootWritable' },
+          h('span', { className: 'dslb-formLabel' }, t('filesRootWritable')),
+          h(Switch, {
+            checked: root.writable === true,
+            label: t('filesRootWritableHint'),
+            disabled,
+            onChange: () => onUpdate(index, { writable: root.writable !== true }),
+          })),
+        h('div', { className: 'dslb-rootActions' },
+          h('button', {
+            type: 'button',
+            className: 'dslb-btn',
+            'data-tone': 'danger',
+            disabled,
+            'aria-label': `${t('filesRootRemove')} ${root.name === '' ? position : root.name}`,
+            onClick: () => onRemove(index),
+          }, t('filesRootRemove'))))
+    }
+
+    /**
+     * The files card. It shares the settings draft with the listener card (one
+     * POST saves both), so it carries no save bar of its own; dirty state and
+     * the save button live there. Peers only ever see the root names, so the
+     * posture line speaks in names, roots and the per-file cap.
+     */
+    function FilesSettings(props) {
+      const { t, form } = props
+      const files = form.draft.files
+      const roots = files.roots
+      const capText = files.maxMiB.trim() === '' ? '256' : files.maxMiB.trim()
+      const posture = files.enabled === true
+        ? [
+          t('filesPostureOn'),
+          t('filesRootsCount', { count: roots.length }),
+          t('filesLimit', { mib: capText }),
+        ].join(' · ')
+        : t('filesPostureOff')
+
+      return h('section', { className: 'dslb-card', 'aria-label': t('filesTitle') },
+        h('div', { className: 'dslb-cardHead' },
+          h('div', { className: 'dslb-cardHeadMain' },
+            h('h3', { className: 'dslb-cardTitle' }, t('filesTitle')),
+            h('p', { className: 'dslb-cardPosture' }, posture),
+            h('p', { className: 'dslb-cardHint' }, t('filesHint')))),
+
+        h('div', { className: 'dslb-list' },
+          h('div', { className: 'dslb-toggleRow' },
+            h('div', { className: 'dslb-main' },
+              h('span', { className: 'dslb-title' }, t('filesEnabled')),
+              h('span', { className: 'dslb-desc' }, t('filesEnabledHint'))),
+            h('div', { className: 'dslb-side' },
+              h(Switch, {
+                checked: files.enabled === true,
+                label: t('filesEnabled'),
+                disabled: form.saving,
+                onChange: () => form.updateFiles({ enabled: files.enabled !== true }),
+              })))),
+
+        h('label', { className: 'dslb-formField' },
+          h('span', { className: 'dslb-formLabel' }, t('filesMax')),
+          h('input', {
+            className: 'dslb-input',
+            value: files.maxMiB,
+            inputMode: 'numeric',
+            spellCheck: false,
+            disabled: form.saving,
+            'aria-label': t('filesMax'),
+            onChange: (event) => form.updateFiles({ maxMiB: event.currentTarget.value }),
+          }),
+          h('span', { className: 'dslb-formHint' }, t('filesMaxHint')),
+          form.filesMaxValid ? null : h('span', { className: 'dslb-formError' }, t('filesMaxInvalid'))),
+
+        h('div', { className: 'dslb-formStack' },
+          h('span', { className: 'dslb-formLabel' }, t('filesRoots')),
+          h('span', { className: 'dslb-formHint' }, t('filesRootsHint')),
+          roots.length === 0
+            ? (files.enabled === true
+              ? h('p', { className: 'dslb-warn', role: 'status' }, t('filesNoRoots'))
+              : null)
+            : h('div', { className: 'dslb-roots' }, roots.map((root, index) => h(FileRootRow, {
+              key: `dslb-root-${index}`,
+              index,
+              root,
+              errors: form.fileRootErrors[index] === undefined
+                ? { name: '', path: '' }
+                : form.fileRootErrors[index],
+              disabled: form.saving,
+              t,
+              onUpdate: form.updateRoot,
+              onRemove: form.removeRoot,
+            }))),
+          h('div', { className: 'dslb-rootFoot' },
+            h('button', {
+              type: 'button',
+              className: 'dslb-btn',
+              disabled: form.saving,
+              onClick: form.addRoot,
+            }, t('filesRootAdd')))))
     }
 
     /**
@@ -2114,6 +2549,10 @@ window.__ModuleLoader__.load({
       }, [data])
 
       // The page head names the surface; the cards below do the talking.
+      // One draft for the whole settings page: the listener card owns the save
+      // bar, the files card edits the same payload, so they must share state.
+      const form = useSettingsForm({ data, t, applyState })
+
       const header = h(React.Fragment, null,
         h('style', { key: 'dslb-style' }, CSS),
         h('div', { className: 'dslb-pageHead', key: 'dslb-head' },
@@ -2134,14 +2573,15 @@ window.__ModuleLoader__.load({
       }
 
       // Order is the operator's question order: what is this machine doing,
-      // how do I change it, who can reach it, which Sessions are exposed, who
-      // is out there.
+      // how do I change it, who can reach it, what may they transfer, which
+      // Sessions are exposed, who is out there.
       return h('div', { className: 'dslb-root', ref: rootRef },
         header,
         h(ErrorBar, { message: state.error, t, onRetry: () => reload() }),
         h(StatusHero, { data, t }),
-        h(ListenSettings, { data, t, applyState }),
+        h(ListenSettings, { data, t, form }),
         h(Peers, { data, t, reload }),
+        h(FilesSettings, { data, t, form }),
         h(Sessions, {
           data,
           t,

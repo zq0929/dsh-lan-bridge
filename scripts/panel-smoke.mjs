@@ -925,6 +925,21 @@ function withState(patch) {
   return { ...LIVE_STATE, ...patch }
 }
 
+/** A state whose operator settings carry a files block with two roots. */
+function withFiles(patch) {
+  const files = {
+    enabled: true,
+    maxFileBytes: 268435456,
+    chunkBytes: 65536,
+    stagingTtlMs: 3600000,
+    roots: [
+      { name: 'notes', path: '/home/dev/notes', writable: true },
+      { name: 'shared', path: '/srv/shared', writable: false },
+    ],
+  }
+  return withState({ settings: { ...LIVE_STATE.settings, files: { ...files, ...patch } } })
+}
+
 /** A failing settings write with a Host-authored message. */
 function refusedSettings(message, code) {
   return {
@@ -1097,6 +1112,9 @@ async function scenario_settings_save_outward() {
     allowPeersToCreateSessions: true,
     trustedHosts: ['mac.local:5977'],
     tls: null,
+    // A Host older than the files card leaves settings.files off; the form
+    // still fills the block in with the documented 256 MiB default.
+    files: { enabled: false, maxFileBytes: 268435456, roots: [] },
   }
   assert(JSON.stringify(writes[0].body) === JSON.stringify(expected), `outward: exact body (got ${JSON.stringify(writes[0].body)})`)
   assert(typeof writes[0].body.port === 'number', 'outward: the port is sent as a number')
@@ -1337,6 +1355,132 @@ async function scenario_host_older_than_panel() {
   results.push('a Host without the discovery field still renders')
 }
 
+async function scenario_files_card_renders() {
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: withFiles() }))
+  mount()
+  await settle()
+  const text = textOf(rendered)
+  for (const expected of ['文件传输', '允许对端传输文件', '单文件上限（MiB）', '根目录', '新增根目录', '删除']) {
+    assert(text.includes(expected), `files: missing ${expected}`)
+  }
+  assert(text.includes('已开启 · 2 个根目录 · 单文件上限 256 MiB'), 'files: posture names the state, the roots and the cap')
+  const enabled = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
+    && node.props['aria-label'] === '允许对端传输文件')
+  assert(enabled.length === 1, 'files: one enable switch')
+  assert(enabled[0].props['aria-checked'] === 'true', 'files: the switch follows settings.files.enabled')
+  assert(inputByLabel(rendered, '单文件上限（MiB）')[0].props.value === '256', 'files: bytes render as MiB')
+  assert(inputByLabel(rendered, '名称 1')[0].props.value === 'notes', 'files: first root name')
+  assert(inputByLabel(rendered, '名称 2')[0].props.value === 'shared', 'files: second root name')
+  const pathFields = inputByLabel(rendered, '路径 1')
+  assert(pathFields.length === 1 && pathFields[0].props.value === '/home/dev/notes', 'files: first root path')
+  assert(pathFields[0].props.className.includes('dslb-inputMono'), 'files: the path is mono')
+  const writable = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
+    && node.props['aria-label'] === '允许写入此根目录')
+  assert(writable.length === 2, `files: one writable switch per root (got ${writable.length})`)
+  assert(writable[0].props['aria-checked'] === 'true' && writable[1].props['aria-checked'] === 'false',
+    'files: writable follows each root')
+  const removeButtons = findAll(rendered, (node) => node.type === 'button' && textOf([node]).trim() === '删除')
+  assert(removeButtons.length === 2, 'files: one remove button per root')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'files: a healthy files block is not an alert')
+  results.push('the files card renders the posture, the cap and every root from state')
+}
+
+async function scenario_files_save_bytes() {
+  const saved = withFiles({
+    maxFileBytes: 536870912,
+    roots: [
+      { name: 'notes', path: '/home/dev/notes', writable: true },
+      { name: 'shared', path: '/srv/shared', writable: false },
+      { name: 'extra', path: '/home/dev/extra', writable: true },
+    ],
+  })
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.settings')) {
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, state: saved } }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: withFiles() }
+  })
+  mount()
+  await settle()
+  await type('单文件上限（MiB）', '512')
+  clickable(rendered, '新增根目录').props.onClick()
+  await settle()
+  await type('名称 3', 'extra')
+  await type('路径 3', '/home/dev/extra')
+  const writable = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
+    && node.props['aria-label'] === '允许写入此根目录')
+  writable[2].props.onClick()
+  await settle()
+  assert(saveButton(rendered).props.disabled === false, 'files save: an edit makes the shared save bar live')
+  saveButton(rendered).props.onClick()
+  await settle()
+  const writes = settingsWrites()
+  assert(writes.length === 1, `files save: one settings write (got ${writes.length})`)
+  assert(writes[0].body.files.maxFileBytes === 536870912, `files save: MiB becomes bytes (got ${writes[0].body.files.maxFileBytes})`)
+  assert(writes[0].body.files.enabled === true, 'files save: enabled travels with the block')
+  assert(JSON.stringify(writes[0].body.files.roots) === JSON.stringify([
+    { name: 'notes', path: '/home/dev/notes', writable: true },
+    { name: 'shared', path: '/srv/shared', writable: false },
+    { name: 'extra', path: '/home/dev/extra', writable: true },
+  ]), `files save: roots as edited (got ${JSON.stringify(writes[0].body.files.roots)})`)
+  assert(stateReads() === 1, `files save: the answer replaces state without a re-read (reads: ${stateReads()})`)
+  assert(inputByLabel(rendered, '单文件上限（MiB）')[0].props.value === '512', 'files save: the form rebases on the answer')
+  results.push('saving the files block converts MiB to bytes and posts every root')
+}
+
+async function scenario_files_missing() {
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: LIVE_STATE }))
+  mount()
+  await settle()
+  const text = textOf(rendered)
+  assert(text.includes('文件传输'), 'files missing: the card still renders')
+  assert(text.includes('已关闭'), 'files missing: the posture is off')
+  assert(text.includes('还没有根目录') === false, 'files missing: a disabled block does not nag about roots')
+  const enabled = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
+    && node.props['aria-label'] === '允许对端传输文件')
+  assert(enabled.length === 1 && enabled[0].props['aria-checked'] === 'false', 'files missing: the switch is off')
+  assert(inputByLabel(rendered, '单文件上限（MiB）')[0].props.value === '256', 'files missing: the 256 MiB default')
+  assert(inputByLabel(rendered, '名称 1').length === 0, 'files missing: no root rows')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'files missing: an absent block is not an error')
+  // Enabling with no roots is the one state that has to explain itself.
+  enabled[0].props.onClick()
+  await settle()
+  assert(textOf(rendered).includes('还没有根目录：对端看不到任何可读写的目录'), 'files missing: enabling explains the empty root list')
+  results.push('a Host without settings.files renders an off files card with no alert')
+}
+
+async function scenario_pair_files_unchecked() {
+  hookStore.clear()
+  instances.clear()
+  calls.length = 0
+  handler = async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.pair')) {
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, token: 'lzb_0123456789abcdef' } }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: LIVE_STATE }
+  }
+  mount()
+  await settle()
+  clickable(rendered, '配对新对等端').props.onClick()
+  await settle()
+  assert(chipLabels(rendered).includes('文件传输'), 'pair: the files capability is offered')
+  const chipsAll = chips(rendered)
+  const filesChip = chipsAll.find((node) => textOf([node]).trim() === '文件传输')
+  assert(filesChip !== undefined && filesChip.props['aria-pressed'] === 'false', 'pair: files starts unchecked')
+  const approveChip = chipsAll.find((node) => textOf([node]).trim() === '代答审批')
+  assert(approveChip !== undefined && approveChip.props['aria-pressed'] === 'false', 'pair: approve stays unchecked too')
+  const nameInput = findAll(rendered, (node) => node.type === 'input' && node.props['aria-label'] === '对等端名称')
+  nameInput[0].props.onChange({ currentTarget: { value: 'bench-box' } })
+  await settle()
+  clickable(rendered, '生成令牌').props.onClick()
+  await settle()
+  const pairCalls = calls.filter((call) => call.url.endsWith('/api/lan-bridge.pair'))
+  assert(pairCalls.length === 1, 'pair files: one call')
+  assert(JSON.stringify(pairCalls[0].body.capabilities) === JSON.stringify(['read', 'prompt']),
+    `pair files: only the defaults are granted (got ${JSON.stringify(pairCalls[0].body.capabilities)})`)
+  results.push('the pair dialog offers files but never grants it by default')
+}
+
 const scenarios = [
   scenario_host_older_than_panel,
   scenario_loading,
@@ -1370,6 +1514,10 @@ const scenarios = [
   scenario_settings_listener_down,
   scenario_settings_envelope_shape,
   scenario_settings_malformed,
+  scenario_files_card_renders,
+  scenario_files_save_bytes,
+  scenario_files_missing,
+  scenario_pair_files_unchecked,
 ]
 
 let failed = 0
