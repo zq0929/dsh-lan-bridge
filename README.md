@@ -36,7 +36,7 @@
 # 2) 在 DSH 里用插件管理器安装这个目录（绝对路径）
 #    plugin_manager action=install_bundle target=/绝对路径/dsh-lan-bridge
 # 3) 重启 DSH（桌面版退出重开），插件按 cordis.patch.yml 的默认配置挂载：
-#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 11 个工具 + 面板 + 可选 mDNS
+#    监听 127.0.0.1:5977（仅本机，LAN 不可达）+ 12 个工具 + 面板 + 可选 mDNS
 ```
 
 装完在 Web UI 里应该能看到「局域网桥」面板（会话共享开关 / peer 列表 / 配对）。
@@ -136,7 +136,7 @@
 
 两个方向别混：**面板的“配对 peer”发的是入站 token**（别人来控我）；**出站**（我去控别人）只能在
 控制侧用 `lan_dsh_peers action=add` 加，把对方面板给的 URL+token 填进去。想给对方 `control`（取消/改名/
-切模型）或 `create`/`archive`/`collab` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]`
+切模型）或 `create`/`archive`/`collab`/`approve` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]（要代答审批再加 `"approve"`）`
 在 A 上签发，再把 token 交给 B。
 
 ## 对端提示词
@@ -153,11 +153,12 @@
 | `lan_dsh_share` | `list` / `share` / `unshare`：**本机**会话共享开关（peer 永远不能调这个） |
 | `lan_dsh_sessions` | 列 peer 共享出来的会话 |
 | `lan_dsh_transcript` | 读 peer 某会话的历史尾部（含 `seq type` 预览） |
-| `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复；可带 `intent` 说明意图 |
+| `lan_dsh_prompt` | 往 peer 会话发任务，默认等回合结束并回收回复（自动从回复里的 cursor 起算，不会把旧回合混进来）；可带 `intent` 说明意图 |
+| `lan_dsh_approval` | `list` / `answer`：列出并代答 peer 卡住的审批（需要该 token 带 `approve` 能力，默认不签） |
 | `lan_dsh_board` | 读共享板：两台机器的任务 + 目标文档（`machine/id` 命名空间，只读合并） |
 | `lan_dsh_task` | 在共享板上建任务 / 按 revision CAS 改任务（认领、完成、改依赖、改派）/ `action=transfer` 把任务归属交给另一台机器 |
 | `lan_dsh_goal` | 读 / CAS 写 / 清空 / **双向收敛**共享目标文档（"什么叫做完"写在这里） |
-| `lan_dsh_wait` | 继续等一个还在跑的回合 |
+| `lan_dsh_wait` | 继续等一个还在跑的回合；可带 `afterSeq` 只读某个序号之后的新内容 |
 | `lan_dsh_cancel` | 打断 peer 当前回合 |
 
 ## 安全模型（请照着读一遍）
@@ -169,13 +170,35 @@
 2. **身份**：每个 peer 一个 `lzb_…` bearer token，只存 SHA-256，可随时在面板吊销。请求还要过
    `X-DSH-Bridge: 1` 自定义头（浏览器要发它必须先过 preflight，而 OPTIONS 一律拒绝）+ `Host` 栅栏 +
    拒绝任何 `Origin`/`Sec-Fetch-Site`/`Sec-Fetch-Dest`，挡掉浏览器侧 CSRF 与 DNS rebinding。
-3. **会话**：peer 只看得到你勾了共享的会话；审批永远不代答。
+3. **会话**：peer 只看得到你勾了共享的会话；审批默认不代答（要代答必须显式签发 `approve` 能力，见下）。
 
 **token 泄露 ≈ 把共享会话的执行权交出去**：共享会话里 agent 能跑 shell、改文件。所以：
 只共享你真的愿意让对端驱动的会话；用完 `unshare`；发现异常立刻面板吊销。
 
-审批（approval）与提问（ask_user_question）**不在 v1 支持范围内**：远端回合卡在审批时，
-`lan_dsh_prompt`/`lan_dsh_wait` 返回 `reason: "input-required"`，需要 A 机上的人点一下。
+### 跨机代答审批（0.3.13 起，默认关闭）
+
+远端回合卡在审批时，`lan_dsh_prompt`/`lan_dsh_wait` 返回 `reason: "input-required"`。默认仍然要 A 机上的人点一下；
+如果那台机器上没有人在，可以显式授权对端代答：
+
+```bash
+lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","approve"]
+```
+
+然后在 A 机的 agent 里：
+
+```bash
+lan_dsh_approval { action: "list", peer: "b-mac" }
+lan_dsh_approval { action: "answer", peer: "b-mac", id: "8b1d…", decision: "allow" }
+```
+
+规则（写死，不能改配置绕过）：
+
+- `approve` **不在默认能力里**，配对只会给 `read`+`prompt`；签发它等于把"允许本机跑一次被拦下的工具调用"的权力交出去。
+- 只对**已共享会话**生效；未共享会话的审批既列不出来也答不了。
+- 代答是**有界等待**：120 秒（`approvalRelayMs`）内没收到远端答复就自动落回本机的人工弹窗，所以不会把回合卡死。
+- 每次代答在 `audit.jsonl` 里留一行（`method: "approval.answer"`），含 peer、会话、工具、决定。
+- Host 自己的 `never` 审批策略在本插件之前生效，**代答无法绕过**它。
+- 提问（`ask_user_question`）**仍不支持**代答：那需要理解上下文才能答，不属于机械决定。
 
 ### 共享板：把"做到哪一步"也送过去
 

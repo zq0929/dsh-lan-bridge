@@ -23,9 +23,14 @@ vulnerability). A reproducer and the affected version (`bridge.hello` → `versi
 - **Plaintext HTTP is the default transport.** The panel refuses to expose a non-loopback address
   without `insecureHttp: true` or TLS, but once enabled the bearer token travels unencrypted on the
   LAN. Use TLS (`tls.certFile` / `tls.keyFile`) on untrusted networks.
-- **No approval relay.** A remote turn that stops on an approval or a question stays blocked and is
-  reported as `input-required`; the human at the controlled machine must act. This is deliberate:
-  letting a remote peer answer approvals would make the token equivalent to full local control.
+- **Approval relay is opt-in, bounded, and audited (0.3.13+).** A remote turn that stops on an
+  approval stays blocked and reports `input-required` unless the operator mints a token with the
+  `approve` capability, which pairing never grants by default. When granted, the peer can allow or
+  refuse the specific tool calls DSH's own policy already stopped: the Host's `never` policy runs
+  first and cannot be bypassed, only *shared* Sessions are visible or answerable, silence falls back
+  to the local human prompt after `approvalRelayMs` (default 120 s), and every decision appends an
+  audit line. Treat `approve` as the strongest bit in the set — it is the power to let work run on
+  the other machine. Questions (`ask_user_question`) are still never answered remotely.
 - **Cross-machine prompt injection is possible.** Text read from a remote Session is untrusted data;
   `docs/peer-prompt.md` tells controlling agents to treat it that way.
 - **Pre-stable upstream API.** The bridge maps `ctx.sessionController` / `ctx.workspaceController`

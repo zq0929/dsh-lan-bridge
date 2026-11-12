@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.12", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.3.13", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -60,7 +60,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
     "tasks.list": true, "tasks.create": true, "tasks.update": true,
     "tasks.transfer": true, "tasks.adopt": true,
     "goal.get": true, "goal.set": true, "goal.clear": true, "goal.adopt": true,
-    "approval.answer": false
+    "approval.list": true, "approval.answer": true
   },
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
              "allowPeersToCreateSessions": true }
@@ -68,7 +68,9 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 ```
 
 `name` is the listener's configured peer-visible name. `session.create` is false unless
-`allowPeersToCreateSessions`; `approval.answer` is always false in v1.
+`allowPeersToCreateSessions`. `approval.list` / `approval.answer` are advertised `true` from
+0.3.13, but answering still needs a token minted with the `approve` capability, which pairing
+never grants by default.
 
 ### `session.list` → params `{}`
 
@@ -212,7 +214,7 @@ its operator to write again.
 
 Limits: 200 tasks, 50 tombstones, 20 blockers, 40 write scopes, 20 KB goal text.
 
-### `session.wait` → params `{ sessionId, timeoutMs?, maxMessages? }`
+### `session.wait` → params `{ sessionId, timeoutMs?, afterSeq? }`
 
 Resolves when the target turn reaches idle, an approval becomes pending, or the timeout fires.
 
@@ -221,6 +223,47 @@ Resolves when the target turn reaches idle, an approval becomes pending, or the 
 ```
 
 `reason` ∈ `idle` | `input-required` | `timeout`. `timeoutMs` is clamped to `limits.maxWaitMs`.
+
+`afterSeq` filters the returned `records` to those newer than that sequence number, and
+changes what silence means:
+
+| `afterSeq` | A quiet Session is reported as |
+|---|---|
+| omitted | `idle` once it has been quiet for ~1.2 s — nothing can prove a turn is coming |
+| given | `timeout` with an empty `records` — with a cursor, silence is not proof the turn stopped |
+
+The wait samples the Session every 200 ms instead of subscribing to status events, because a
+subscriber can miss the `running` flip that happens between the first read and the
+subscription (the bug that made a freshly queued prompt look finished). A Session that never
+started is therefore not reported `idle` on the first read.
+
+`session.prompt` returns the `cursor` to use as `afterSeq`, so a caller never has to guess
+which records belong to the turn it just queued.
+
+### `approval.list` → params `{}` → `{ "approvals": [ … ] }`
+
+```json
+{ "approvals": [ { "id": "8b1d…", "sessionId": "session-…", "toolName": "shell",
+                   "callId": "call-…", "reason": "writes outside the workspace",
+                   "askedAt": 1765520000000 } ] }
+```
+
+Every approval this machine is waiting on, for **shared** Sessions only, oldest first.
+Requires `read`.
+
+### `approval.answer` → params `{ id, decision }` → `{ "ok": true, "id": "…", "outcome": "allowed-once" }`
+
+`decision` ∈ `allow` | `reject` | `cancel`, mapping to the Host's
+`allowed-once` | `rejected` | `cancelled`. Requires the **`approve`** capability and a shared
+Session; unknown ids answer `bridge/not-found`, a non-shared Session answers
+`session/not-shared`, and an unknown `decision` answers `bridge/bad-request`.
+
+The relay is a bounded wait, not a replacement for the local UI: the bridge intercepts the
+approval ahead of the browser answerer, asks whichever peer holds an `approve` token, and
+falls back to the local prompt when no answer arrives within `approvalRelayMs` (default 120 s)
+or the request is cancelled. The Host's own `never` policy is applied before any answerer
+runs, so it cannot be bypassed this way. Every remote decision is written to the audit log
+(`method: "approval.answer"`) before it is handed to the waterfall.
 
 ### `session.cancel` → params `{ sessionId }` → `{ "accepted": true }`
 

@@ -127,6 +127,7 @@ window.__ModuleLoader__.load({
         capTranscript: '记录',
         capCreate: '创建会话',
         capCollab: '协作板',
+        capApprove: '代答审批',
         capRename: '重命名',
         capSelectModel: '切换模型',
         cancel: '取消',
@@ -264,6 +265,7 @@ window.__ModuleLoader__.load({
         capTranscript: 'transcript',
         capCreate: 'create',
         capCollab: 'collab',
+        capApprove: 'approvals',
         capRename: 'rename',
         capSelectModel: 'select model',
         cancel: 'Cancel',
@@ -830,6 +832,7 @@ window.__ModuleLoader__.load({
       if (capability === 'transcript') return t('capTranscript')
       if (capability === 'create') return t('capCreate')
       if (capability === 'collab') return t('capCollab')
+      if (capability === 'approve') return t('capApprove')
       if (capability === 'rename') return t('capRename')
       if (capability === 'selectModel') return t('capSelectModel')
       return capability
@@ -840,7 +843,7 @@ window.__ModuleLoader__.load({
      * Mirrors CAPABILITIES in lib/config.js; the Host stays the authority and
      * drops names it does not know.
      */
-    const PAIR_CAPABILITIES = ['read', 'prompt', 'control', 'create', 'archive', 'collab']
+    const PAIR_CAPABILITIES = ['read', 'prompt', 'control', 'create', 'archive', 'collab', 'approve']
 
     /** What a fresh token gets when the operator changes nothing. */
     const DEFAULT_PAIR_CAPABILITIES = ['read', 'prompt']

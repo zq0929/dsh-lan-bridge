@@ -93,6 +93,22 @@ function createFakeCtx() {
     provide(name, value) {
       services.set(name, value)
     },
+    /**
+     * Drive one waterfall event the way Cordis does: the registered listener
+     * receives the request and the `next` it may call to fall through.
+     */
+    async waterfall(name, request, fallback) {
+      const listeners = [...(handlers.get(name) ?? [])]
+      const inner = async () => (fallback === undefined ? 'unavailable' : fallback())
+      let index = 0
+      const next = async () => {
+        const listener = listeners[index]
+        index += 1
+        if (listener === undefined) return inner()
+        return listener(request, next)
+      }
+      return next()
+    },
     async dispose() {
       for (const dispose of disposers.reverse()) {
         if (typeof dispose === 'function') await dispose()
@@ -452,6 +468,29 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('wait ends idle', waiting.body.result.reason, 'idle')
   const texts = JSON.stringify(waiting.body.result.records)
   check('wait returns the assistant reply', texts.includes('PONG: ping'), texts.slice(0, 200))
+  check('prompt reports the cursor to wait from', typeof prompt.body.result.cursor === 'number', JSON.stringify(prompt.body.result))
+  // afterSeq is honoured: nothing at or below the baseline comes back, and a
+  // quiet Session is reported as "nothing new within the budget" rather than a
+  // false idle — with a cursor, silence is not proof the turn stopped.
+  const again = await rpc('session.wait', { sessionId: target.summary.sessionId, timeoutMs: 1500, afterSeq: waiting.body.result.cursor }, { token })
+  equal('a quiet tail past the cursor reports timeout', again.body.result.reason, 'timeout')
+  equal('a quiet tail past the cursor returns no old records', again.body.result.records.length, 0)
+  const seqs = waiting.body.result.records.map(record => record?.event?.seq ?? record?.seq).filter(value => typeof value === 'number')
+  check('afterSeq filtered the tail', seqs.every(seq => seq > before), JSON.stringify(seqs))
+}
+
+// --- a queued prompt that has not started is not "idle" yet ---------------
+{
+  steps.push('')
+  steps.push('wait race')
+  // A turn that has not flipped `running` yet must not be reported idle on the
+  // first read: that was the bug that made a fresh prompt look finished.
+  fake.append(target, 'user/message', { message: { role: 'user', content: [{ type: 'text', text: 'queued but not started' }] } })
+  const started = Date.now()
+  const waiting = await rpc('session.wait', { sessionId: target.summary.sessionId, timeoutMs: 8000 }, { token })
+  const elapsed = Date.now() - started
+  equal('unstarted prompt still settles idle', waiting.body.result.reason, 'idle')
+  check('wait did not return on the first tick', elapsed >= 1000, `elapsed ${String(elapsed)}ms`)
 }
 
 // --- intent envelope -----------------------------------------------------
@@ -561,6 +600,75 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('decided approval clears pendingInput', state.body.result.pendingInput, false)
 }
 
+// --- remote approval answering -------------------------------------------
+{
+  steps.push('')
+  steps.push('approval relay')
+  const approver = await store.pair({ name: 'it-approver', capabilities: ['read', 'approve'] })
+  fake.append(target, 'approval/asked', { id: 'ap-relay', toolName: 'shell', reason: 'write outside the workspace' })
+  const listed = await rpc('approval.list', {}, { token: approver.token })
+  equal('approval.list sees the pending approval', listed.body.result.approvals.length, 1)
+  equal('approval.list names the tool', listed.body.result.approvals[0].toolName, 'shell')
+  equal('approval.list names the Session', listed.body.result.approvals[0].sessionId, target.summary.sessionId)
+  const unprivileged = await rpc('approval.answer', { id: 'ap-relay', decision: 'allow' }, { token })
+  equal('answering without approve → bridge/forbidden', unprivileged.body.error.code, 'bridge/forbidden')
+  const badDecision = await rpc('approval.answer', { id: 'ap-relay', decision: 'maybe' }, { token: approver.token })
+  equal('an unknown decision is a bad request', badDecision.body.error.code, 'bridge/bad-request')
+  const unknown = await rpc('approval.answer', { id: 'nope', decision: 'allow' }, { token: approver.token })
+  equal('answering an unknown approval → bridge/not-found', unknown.body.error.code, 'bridge/not-found')
+
+  // The waterfall listener waits for the peer, so answer from the far side.
+  const relayed = ctx.waterfall('approval/request', {
+    agent: { session: { id: target.summary.sessionId } },
+    toolName: 'shell',
+    reason: 'write outside the workspace',
+  }, () => 'unavailable')
+  setTimeout(() => {
+    void rpc('approval.answer', { id: 'ap-relay', decision: 'allow' }, { token: approver.token })
+  }, 50)
+  equal('a relayed approval returns the remote decision', await relayed, 'allowed-once')
+  fake.append(target, 'approval/decided', { id: 'ap-relay', outcome: 'allowed-once' })
+
+  // Silence falls back to the local answerers instead of blocking the turn.
+  fake.append(target, 'approval/asked', { id: 'ap-silent', toolName: 'shell' })
+  const aborter = new AbortController()
+  const silent = ctx.waterfall('approval/request', {
+    agent: { session: { id: target.summary.sessionId } },
+    toolName: 'shell',
+    signal: aborter.signal,
+  }, () => 'unavailable')
+  setTimeout(() => { aborter.abort() }, 50)
+  equal('a silent peer falls through to the local UI', await silent, 'unavailable')
+  fake.append(target, 'approval/decided', { id: 'ap-silent', outcome: 'unavailable' })
+
+  // An answer that races ahead of the waterfall is held, then consumed.
+  fake.append(target, 'approval/asked', { id: 'ap-early', toolName: 'shell' })
+  const early = await rpc('approval.answer', { id: 'ap-early', decision: 'reject' }, { token: approver.token })
+  equal('an early answer is recorded', early.body.result.outcome, 'rejected')
+  const consumed = await ctx.waterfall('approval/request', {
+    agent: { session: { id: target.summary.sessionId } },
+    toolName: 'shell',
+  }, () => 'unavailable')
+  equal('the early answer is consumed by the waterfall', consumed, 'rejected')
+  fake.append(target, 'approval/decided', { id: 'ap-early', outcome: 'rejected' })
+
+  // An unshared Session is never relayed, even with an approving peer present.
+  await store.setShared(target.summary.sessionId, false)
+  fake.append(target, 'approval/asked', { id: 'ap-private', toolName: 'shell' })
+  const privateList = await rpc('approval.list', {}, { token: approver.token })
+  equal('approval.list hides unshared Sessions', privateList.body.result.approvals.length, 0)
+  const notRelayed = await ctx.waterfall('approval/request', {
+    agent: { session: { id: target.summary.sessionId } },
+    toolName: 'shell',
+  }, () => 'unavailable')
+  equal('an unshared Session falls through locally', notRelayed, 'unavailable')
+  fake.append(target, 'approval/decided', { id: 'ap-private', outcome: 'unavailable' })
+  await store.setShared(target.summary.sessionId, true)
+  const audited = await rpc('approval.answer', { id: 'ap-relay', decision: 'allow' }, { token: approver.token })
+  equal('an already decided approval is gone', audited.body.error.code, 'bridge/not-found')
+  await store.revoke('it-approver')
+}
+
 // --- cancel --------------------------------------------------------------
 {
   steps.push('')
@@ -640,8 +748,8 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 {
   steps.push('')
   steps.push('tools')
-  equal('eleven tools registered', tools.size, 11)
-  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal']) {
+  equal('twelve tools registered', tools.size, 12)
+  for (const name of ['lan_dsh_peers', 'lan_dsh_share', 'lan_dsh_sessions', 'lan_dsh_transcript', 'lan_dsh_prompt', 'lan_dsh_wait', 'lan_dsh_cancel', 'lan_dsh_archive', 'lan_dsh_board', 'lan_dsh_task', 'lan_dsh_goal', 'lan_dsh_approval']) {
     check(`tool ${name} present`, tools.has(name))
   }
   const exec = async (name, args) => tools.get(name).execute(args, { signal: undefined })
@@ -1032,6 +1140,38 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   await uiCall('settings', { discovery: false })
   equal('discovery switch stops the responder immediately', discoveryProbe.listening, false)
   equal('discovery is off in the live config again', cfg.discovery.enabled, false)
+}
+
+// --- the panel reads the switch, not the responder ------------------------
+{
+  steps.push('')
+  steps.push('discovery state flag')
+  // A responder that is bound while the operator's switch is off used to be
+  // reported as `enabled: true`, so the panel's "off" empty state never showed.
+  const probe = { listening: true, status() { return { listening: true } }, async start() {}, stop() {} }
+  const flagCtx = createFakeCtx()
+  const routes = new Map()
+  flagCtx.provide('connection', {
+    fetch: {
+      register(route) {
+        routes.set(route.path, route)
+        return () => routes.delete(route.path)
+      },
+    },
+  })
+  const saved = cfg.discovery.enabled
+  cfg.discovery.enabled = false
+  installUi({ ctx: flagCtx, cfg, store, server, remote, peerCache, logger: flagCtx.logger, ready: Promise.resolve(), discovery: probe })
+  const route = routes.get('/api/lan-bridge.state')
+  const read = async () => (await route.fetch(new Request('http://127.0.0.1/api/lan-bridge.state'))).json()
+  const off = await read()
+  equal('a bound responder does not imply the switch is on', off.discovery.enabled, false)
+  equal('responder liveness is still reported', off.discovery.listening, true)
+  cfg.discovery.enabled = true
+  const on = await read()
+  equal('flipping the switch flips the reported flag', on.discovery.enabled, true)
+  cfg.discovery.enabled = saved
+  await flagCtx.dispose()
 
   const created = await uiCall('settings', { allowPeersToCreateSessions: true })
   equal('create-session switch saved', created.ok, true)

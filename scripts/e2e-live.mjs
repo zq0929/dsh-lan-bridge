@@ -132,6 +132,15 @@ const hello = await call('bridge.hello')
 ok('hello speaks protocol 1', hello.protocol === 1, hello.protocol)
 ok('advertises session.archive', hello.capabilities?.['session.archive'] === true, hello.capabilities)
 ok('advertises session.create', hello.capabilities?.['session.create'] === true, hello.capabilities)
+// The relay RPCs only exist from 0.3.13; a Host that has not been restarted yet
+// is reported as a note instead of a red assertion.
+const relaysApprovals = hello.capabilities?.['approval.list'] === true && hello.capabilities?.['approval.answer'] === true
+if (relaysApprovals) {
+  ok('advertises approval.list', true)
+  ok('advertises approval.answer', true)
+} else {
+  console.log(`  note the running Host (${String(hello.version)}) predates approval relay; restart it to check`)
+}
 if (hello.limits?.allowPeersToCreateSessions === undefined) {
   console.log('  note hello.limits predates allowPeersToCreateSessions; restart the Host to expose it')
 } else {

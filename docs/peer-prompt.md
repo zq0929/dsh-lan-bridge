@@ -40,7 +40,9 @@
 > 4. 用 `lan_dsh_prompt peer=a sessionId=… text="…"` 派活。`text` 要写成「对 A 机上那个 agent 说的原话」：
 >    带上目标、约束、验收标准，别写「帮我看看」这种没有终点的指令。默认会等这一回合跑完再返回。
 > 5. 看 `reason`：`idle` = 跑完了 → 再 `lan_dsh_transcript` 取最终答复核对，不要凭印象汇报；
->    `input-required` = 卡在 A 机的审批或提问，**只有 A 机上的人能答** → 立刻停下来告诉我，别循环重试；
+>    `input-required` = 卡在 A 机的审批或提问：如果我的 token 带 `approve` 能力，
+>    用 `lan_dsh_approval action=list peer=a` 看看卡在什么上，再用 `action=answer decision=allow|reject` 决定；
+>    没有这个能力就立刻停下来告诉我（别循环重试）。**allow 是真实授权**，只在理由清楚时才给；
 >    `timeout` = 还在跑 → 用 `lan_dsh_wait peer=a sessionId=… timeoutMs=…` 继续等（可以多次等）。
 > 6. 同一个会话不要并发塞多条 prompt；要打断用 `lan_dsh_cancel`，并在汇报里说明你打断了什么、为什么
 >    （A 机上的人会看到这一回合被中止）。
