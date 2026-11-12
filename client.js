@@ -1,17 +1,43 @@
 /**
  * Browser half of the LAN bridge panel: one Settings section
- * (`settings.section`) that owns the listener itself — bind address, port,
- * TLS pair and the peer permissions — and, below it, this machine's identity,
- * the Session sharing switches a peer's `session.list` reflects, and the
- * inbound / outbound peer inventory with pairing and revocation. Saving the
- * listener POSTs the whole settings set and replaces the panel state with the
- * state the answer carries, so a clamped port or a failed rebind shows up in
- * the same paint.
+ * (`settings.section`) that renders the bridge as a page of cards. The page
+ * refreshes itself every 3 s while it is on screen (and on window focus), and
+ * nothing inside it trusts a payload: a Host older than the panel, a missing
+ * key or a malformed list degrades to an empty or partial card, never to a
+ * thrown render.
+ *
+ * Layout (top to bottom), each block one `.dslb-card` of the same column:
+ *   1. `StatusHero`    — name, role pill, listener state line, copyable address
+ *   2. `ListenSettings`— the listener itself: name, bind address/port, plaintext
+ *                        consent, mDNS switch, trusted hosts, TLS pair, sticky
+ *                        save bar. Saving POSTs the whole settings set and
+ *                        replaces the panel state with the state the answer
+ *                        carries, so a clamped port or a failed rebind shows up
+ *                        in the same paint. No optimistic write, no re-read.
+ *   3. `Peers`         — inbound / outbound sub-cards plus `Pairing` (a one-time
+ *                        token, shown once, never persisted here)
+ *   4. `Sessions`      — the sharing switches: the panel's main decision
+ *                        surface, optimistic with a revert on refusal
+ *   5. `Discovery`     — mDNS neighbours heard on the LAN (read-only)
  *
  * Every read goes through the Host's own cookie-authenticated route
  * (`api/lan-bridge.*` on the Web listener), never through the bridge
  * listener itself: browsers are not peers, so the bridge's own `/rpc`
  * fence refuses them by design.
+ *
+ * Style notes — the metrics are copied from the shell's own Settings page
+ * (`dsh/client-ui-settings-*`), not invented: a 720px column of
+ * `settings-card-fill` cards with a 0.5px `settings-card-stroke` edge and
+ * `--dsw-radius-xl` corners, 12/14px card padding, 12px gaps, 32px inputs on
+ * `bg-base` with a 0.5px `border-l2` edge and a 12px radius, labels above the
+ * field, 14px row titles over 12px descriptions, mono 12px for addresses and
+ * tokens. Every `var()` carries a literal fallback so a renamed token drops
+ * the declaration rather than the surface. Two deliberate deviations: the
+ * focus ring takes its width from `--dsw-focus-ring-width` but its colour from
+ * `--dsw-alias-brand-primary`, because `--dsw-focus-ring-color` resolves to
+ * `transparent` in the base theme; and `#fff` appears only as the fallback for
+ * `--dsw-alias-label-primary-foreground`, never as a surface. Dark mode holds
+ * because every surface, border and label is a token.
  */
 
 window.__ModuleLoader__.load({
@@ -133,6 +159,23 @@ window.__ModuleLoader__.load({
         settingsNotListening: '未监听',
         settingsListenError: '监听失败：{message}',
         settingsStateMissing: '服务端没有返回新的状态',
+        listening: '监听中',
+        plainHttp: '明文 HTTP',
+        tlsShort: 'TLS',
+        copyAddress: '复制地址',
+        settingsDirty: '未保存',
+        peersHint: '入站是对等端持有本机令牌；出站是本机持有对方令牌。',
+        inboundHint: '持有本机令牌、可以连进来的对等端',
+        outboundHint: '本机作为控制端连接的对等端',
+        pairHint: '生成一枚只显示一次的令牌，交给另一台机器。',
+        noSessionsNext: '在 DSH 里开一个会话后回到这里，就能决定是否把它共享给对等端。',
+        noInboundNext: '点「配对新对等端」生成令牌，交给另一台机器。',
+        noOutboundNext: '在另一台机器上把本机令牌配对过去，它就会出现在这里。',
+        noDiscovery: '还没有听到局域网里的其它机器',
+        noDiscoveryOff: '局域网发现已关闭',
+        noDiscoveryNext: '在同一网段里打开上面监听设置中的「局域网发现（mDNS）」，其它同样打开的机器就会自动出现在这里。',
+        discoveryFoundHint: '同一网段里广播自身的机器；令牌从不广播，配对仍需手动。',
+        discoveryError: '发现失败：{message}',
       },
       en: {
         nav: 'LAN bridge',
@@ -240,6 +283,23 @@ window.__ModuleLoader__.load({
         settingsNotListening: 'not listening',
         settingsListenError: 'Listener failed: {message}',
         settingsStateMissing: 'The Host returned no new state',
+        listening: 'Listening on',
+        plainHttp: 'plaintext HTTP',
+        tlsShort: 'TLS',
+        copyAddress: 'Copy address',
+        settingsDirty: 'Unsaved',
+        peersHint: 'Inbound peers hold a token for this machine; outbound peers are machines this one controls.',
+        inboundHint: 'Peers holding a token for this machine',
+        outboundHint: 'Peers this machine connects out to',
+        pairHint: 'Mint a token that is shown once, then hand it to the other machine.',
+        noSessionsNext: 'Open a Session in DSH, then come back here to decide whether peers may drive it.',
+        noInboundNext: 'Choose “Pair a peer” to mint a token and hand it to the other machine.',
+        noOutboundNext: 'Pair this machine’s token on the other side and it shows up here.',
+        noDiscovery: 'No other machine heard on the LAN yet',
+        noDiscoveryOff: 'LAN discovery is off',
+        noDiscoveryNext: 'Turn on “LAN discovery (mDNS)” in the listener settings above; machines in the same subnet that also have it on appear here automatically.',
+        discoveryFoundHint: 'Machines announcing themselves in this subnet; tokens are never broadcast, so pairing stays manual.',
+        discoveryError: 'Discovery failed: {message}',
       },
     }
 
@@ -258,91 +318,191 @@ window.__ModuleLoader__.load({
     /** Second line of an inbound peer row keeps only this many characters. */
     const INLINE_LIMIT = 120
 
+    // Every colour comes from a theme token, each with a mode-neutral literal
+    // fallback, so a renamed token degrades to a plain surface instead of
+    // dropping the declaration. Sizes and radii are literals on purpose: the
+    // radii that vanished before were token references, not values.
     const CSS = [
-      '.dslb-root{display:flex;flex-direction:column;width:100%;color:var(--dsw-alias-label-primary);',
-      'font-size:14px;line-height:20px}',
-      '.dslb-group{display:flex;flex-direction:column;width:100%}',
-      '.dslb-groupTitle{padding:16px 0 4px;font-size:12px;line-height:18px;',
-      'color:var(--dsw-alias-label-tertiary);font-weight:500}',
-      '.dslb-hint{padding:0 0 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
-      '.dslb-row{display:flex;align-items:center;justify-content:space-between;gap:24px;',
-      'box-sizing:border-box;padding:16px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}',
-      '.dslb-row:last-child{border-bottom:none}',
-      '.dslb-row[data-quiet="1"]{padding:12px 0}',
-      '.dslb-main{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}',
-      '.dslb-title{display:flex;align-items:center;gap:8px;min-width:0;font-size:14px;line-height:20px}',
-      '.dslb-title .dslb-desc{flex:none}',
-      '.dslb-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.dslb-desc{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-      'font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);',
-      'font-variant-numeric:tabular-nums;overflow-wrap:anywhere}',
-      '.dslb-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px}',
-      '.dslb-dot{width:8px;height:8px;border-radius:50%;flex:none;',
-      'background:var(--dsw-alias-label-tertiary)}',
-      '.dslb-dot[data-on="1"]{background:var(--dsw-alias-state-success-primary)}',
-      '.dslb-dot[data-on="0"]{background:var(--dsw-alias-label-tertiary);opacity:.5}',
-      '.dslb-field{display:flex;align-items:baseline;justify-content:space-between;gap:24px;',
-      'box-sizing:border-box;padding:10px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}',
-      '.dslb-field:last-child{border-bottom:none}',
-      '.dslb-fieldKey{flex:none;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
-      '.dslb-fieldValue{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-      'font-size:14px;line-height:20px;font-variant-numeric:tabular-nums;text-align:right}',
-      '.dslb-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}',
-      '.dslb-chip{padding:0 6px;border-radius:8px;background:var(--dsw-alias-bg-layer-2);',
-      'color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}',
-      '.dslb-side{display:flex;align-items:center;gap:8px;flex:none}',
-      '.dslb-btn{height:28px;padding:0 10px;border:none;border-radius:var(--dsw-radius-sm);',
-      'background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;',
-      'line-height:28px;white-space:nowrap;cursor:pointer}',
-      '.dslb-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
-      '.dslb-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
+      /* ---------- page: one column, the width the Settings dialog gives us ---------- */
+      '.dslb-root{display:flex;flex-direction:column;gap:12px;box-sizing:border-box;width:100%;max-width:720px;',
+      'font-family:var(--dsw-font-family,inherit);font-size:13px;line-height:1.5;',
+      'color:var(--dsw-alias-label-primary,#1f2329)}',
+      '.dslb-pageHead{display:flex;flex-direction:column;gap:2px}',
+      '.dslb-pageTitle{margin:0;font-size:16px;line-height:24px;font-weight:500}',
+      '.dslb-pageSub{margin:0;font-size:14px;line-height:22px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+
+      /* ---------- cards: the native Settings card material ---------- */
+      '.dslb-card{display:flex;flex-direction:column;gap:12px;box-sizing:border-box;padding:12px 14px;',
+      'border:0.5px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l1,rgba(128,128,128,.2)));',
+      'border-radius:var(--dsw-radius-xl,12px);',
+      'background:var(--dsw-alias-settings-card-fill,var(--dsw-alias-bg-layer-1,transparent))}',
+      '.dslb-cardHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0}',
+      '.dslb-cardHeadMain{display:flex;flex-direction:column;gap:2px;min-width:0}',
+      '.dslb-cardTitle{margin:0;font-size:14px;line-height:22px;font-weight:500}',
+      '.dslb-cardHint{margin:0;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+      '.dslb-cardActions{display:flex;align-items:center;gap:8px;flex:none}',
+
+      /* ---------- 1. status card ---------- */
+      '.dslb-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;min-width:0}',
+      '.dslb-heroMain{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1 1 220px}',
+      '.dslb-heroName{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.dslb-heroNameText{min-width:0;font-size:16px;line-height:24px;font-weight:500;',
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dslb-pill{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-secondary,#5b6270);',
+      'border:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));',
+      'background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.08))}',
+      '.dslb-statusLine{display:flex;align-items:center;gap:6px;min-width:0;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-statusText{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dslb-liveDot{flex:none;width:8px;height:8px;border-radius:50%;',
+      'background:var(--dsw-alias-state-success-primary,#2f9e6b)}',
+      '.dslb-liveDot[data-state="idle"]{background:var(--dsw-alias-state-idle-primary,var(--dsw-alias-label-tertiary,#9aa0aa))}',
+      '.dslb-liveDot[data-state="off"]{background:var(--dsw-alias-label-tertiary,#9aa0aa)}',
+      '.dslb-heroSide{display:flex;align-items:center;gap:6px;min-width:0;flex:0 1 auto}',
+      '.dslb-addr{box-sizing:border-box;max-width:100%;padding:3px 8px;border-radius:var(--dsw-radius-sm,6px);',
+      'background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.08));color:var(--dsw-alias-label-secondary,#5b6270);',
+      'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;',
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+
+      /* ---------- buttons ---------- */
+      '.dslb-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;box-sizing:border-box;',
+      'height:32px;padding:0 12px;border:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));',
+      'border-radius:var(--dsw-radius-md,8px);background:transparent;color:var(--dsw-alias-label-primary,#1f2329);',
+      'font:inherit;font-size:13px;line-height:1;white-space:nowrap;cursor:pointer;',
+      'transition:background .12s ease,border-color .12s ease}',
+      '.dslb-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
+      '.dslb-btn:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
+      'outline-offset:1px}',
       '.dslb-btn:disabled{opacity:.5;cursor:default}',
-      '.dslb-btn[data-tone="primary"]{background:var(--dsw-alias-brand-primary);color:#fff}',
-      '.dslb-btn[data-tone="primary"]:hover:not(:disabled){opacity:.9;background:var(--dsw-alias-brand-primary)}',
-      '.dslb-btn[data-tone="danger"]{color:var(--dsw-alias-state-error-primary)}',
-      '.dslb-switch{position:relative;flex:none;box-sizing:border-box;width:36px;height:20px;',
-      'padding:0;border:none;border-radius:10px;background:var(--dsw-alias-border-l3);cursor:pointer;',
-      'transition:background .15s ease}',
-      '.dslb-switch[aria-checked="true"]{background:var(--dsw-alias-brand-primary)}',
-      '.dslb-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;',
-      'border-radius:50%;background:#fff;transition:transform .15s ease}',
+      '.dslb-btn[data-tone="primary"]{border-color:transparent;',
+      'color:var(--dsw-alias-label-primary-foreground,#fff);',
+      'background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#4d6bfe))}',
+      '.dslb-btn[data-tone="primary"]:hover:not(:disabled){',
+      'background:var(--dsw-alias-button-primary-hover,var(--dsw-alias-brand-primary,#4d6bfe))}',
+      '.dslb-btn[data-tone="danger"]{border-color:transparent;background:transparent;',
+      'color:var(--dsw-alias-state-error-primary,#d64545)}',
+      '.dslb-btn[data-tone="danger"]:hover:not(:disabled){',
+      'background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d64545) 10%,transparent)}',
+
+      /* ---------- switch: native button semantics, no primitive dependency ---------- */
+      '.dslb-switch{position:relative;flex:none;box-sizing:border-box;width:36px;height:20px;padding:0;border:none;',
+      'border-radius:999px;background:color-mix(in srgb,var(--dsw-alias-label-tertiary,#9aa0aa) 45%,transparent);',
+      'cursor:pointer;transition:background .12s ease}',
+      '.dslb-switch[aria-checked="true"]{background:var(--dsw-alias-brand-primary,#4d6bfe)}',
+      '.dslb-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;',
+      'background:var(--dsw-alias-label-primary-foreground,#fff);',
+      'box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .12s ease}',
       '.dslb-switch[aria-checked="true"]::after{transform:translateX(16px)}',
-      '.dslb-switch:disabled{cursor:progress;opacity:.6}',
-      '.dslb-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}',
-      '.dslb-form{display:flex;align-items:center;gap:8px;padding:12px 0 16px}',
-      '.dslb-input{flex:1;box-sizing:border-box;min-width:0;height:28px;padding:0 8px;',
-      'border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);',
-      'background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}',
-      '.dslb-input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-1px}',
-      '.dslb-token{display:flex;flex-direction:column;gap:8px;box-sizing:border-box;margin:4px 0 16px;',
-      'padding:12px;border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);',
-      'background:var(--dsw-alias-bg-layer-2)}',
-      '.dslb-tokenTitle{font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);font-weight:500}',
-      '.dslb-tokenRow{display:flex;align-items:center;gap:8px}',
-      '.dslb-tokenRow .dslb-input{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
-      'font-size:11px}',
-      '.dslb-warn{font-size:12px;line-height:18px;color:var(--dsw-alias-state-warn-primary)}',
-      '.dslb-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;',
-      'box-sizing:border-box;margin:12px 0 0;padding:8px 10px;border-radius:var(--dsw-radius-sm);',
-      'background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-state-error-primary);',
-      'font-size:12px;line-height:18px;overflow-wrap:anywhere}',
-      '.dslb-empty{padding:12px 0 16px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
-      '.dslb-loading{padding:24px 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
-      '.dslb-chipsPick{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:2px 0 6px}',
-      '.dslb-chipsPickLabel{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);margin-right:2px}',
-      '.dslb-chipPick{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:16px;padding:2px 8px;border-radius:var(--dsw-radius-xs);border:.5px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}',
-      '.dslb-chipPick:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
-      '.dslb-chipPick[data-current="1"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}',
+      '.dslb-switch:disabled{cursor:default;opacity:.6}',
+      '.dslb-switch:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
+      'outline-offset:2px}',
+
+      /* ---------- form: labels above 32px inputs, two columns where it fits ---------- */
+      '.dslb-formGrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px 16px;min-width:0}',
+      '.dslb-formStack{display:flex;flex-direction:column;gap:12px;min-width:0}',
+      '.dslb-formField{display:flex;flex-direction:column;gap:4px;min-width:0}',
+      '.dslb-formLabel{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-formHint{margin:0;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+      '.dslb-input{box-sizing:border-box;width:100%;height:32px;padding:0 10px;',
+      'border:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));',
+      'border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-base,transparent);',
+      'color:var(--dsw-alias-label-primary,#1f2329);font:inherit;font-size:13px;line-height:20px}',
+      '.dslb-input::placeholder{color:var(--dsw-alias-label-tertiary,#9aa0aa)}',
+      '.dslb-input:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-alias-brand-primary,currentColor);',
+      'outline-offset:1px}',
+      '.dslb-input:disabled{opacity:.6}',
+      '.dslb-check{display:flex;align-items:flex-start;gap:8px;box-sizing:border-box;font-size:13px;line-height:20px;',
+      'color:var(--dsw-alias-label-primary,#1f2329);cursor:pointer}',
+      '.dslb-check input{flex:none;margin:2px 0 0;accent-color:var(--dsw-alias-brand-primary,#4d6bfe)}',
+
+      /* ---------- address / capability chips ---------- */
+      '.dslb-chipsPick{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}',
+      '.dslb-chipsPickLabel{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-chipPick{box-sizing:border-box;padding:2px 9px;border-radius:999px;',
+      'border:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));background:transparent;',
+      'color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:12px;line-height:18px;cursor:pointer}',
+      '.dslb-chipPick:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));',
+      'color:var(--dsw-alias-label-primary,#1f2329)}',
+      '.dslb-chipPick[data-current="1"]{border-color:transparent;color:var(--dsw-alias-brand-primary,#4d6bfe);',
+      'background:color-mix(in srgb,var(--dsw-alias-brand-primary,#4d6bfe) 12%,transparent)}',
       '.dslb-chipPick:disabled{opacity:.5;cursor:default}',
-      '.dslb-formGrid{display:flex;flex-wrap:wrap;gap:12px;padding:4px 0 8px}',
-      '.dslb-formField{display:flex;flex-direction:column;gap:4px;min-width:180px;flex:1 1 220px}',
-      '.dslb-formLabel{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
-      '.dslb-formHint{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}',
-      '.dslb-check{display:flex;align-items:flex-start;gap:8px;box-sizing:border-box;',
-      'padding:8px 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);cursor:pointer}',
-      '.dslb-check input{flex:none;margin:3px 0 0}',
-      '.dslb-ok{font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary)}',
-      '@media (prefers-reduced-motion: reduce){.dslb-switch,.dslb-switch::after{transition:none}}',
+      '.dslb-chips{display:flex;flex-wrap:wrap;gap:4px;min-width:0}',
+      '.dslb-chip{padding:0 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.08));',
+      'color:var(--dsw-alias-label-secondary,#5b6270);font-size:12px;line-height:18px}',
+
+      /* ---------- rows: 44px, top-line separators, hover tint ---------- */
+      '.dslb-list{display:flex;flex-direction:column;min-width:0}',
+      '.dslb-row{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;',
+      'min-height:44px;padding:10px 8px;border-radius:var(--dsw-radius-lg,8px);min-width:0}',
+      '.dslb-list>.dslb-row+.dslb-row{border-top:0.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));',
+      'border-radius:0}',
+      '.dslb-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))}',
+      '.dslb-row[data-quiet="1"]:hover{background:transparent}',
+      '.dslb-toggleRow{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;',
+      'min-height:44px;padding:6px 0;min-width:0}',
+      '.dslb-toggleRow+.dslb-toggleRow{border-top:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3))}',
+      '.dslb-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}',
+      '.dslb-title{display:flex;align-items:center;gap:8px;min-width:0;font-size:14px;line-height:20px}',
+      '.dslb-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dslb-desc{min-width:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#5b6270);',
+      'overflow-wrap:anywhere}',
+      '.dslb-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;',
+      'color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-dot{flex:none;width:8px;height:8px;border-radius:50%;',
+      'background:var(--dsw-alias-label-tertiary,#9aa0aa)}',
+      '.dslb-dot[data-on="1"]{background:var(--dsw-alias-state-success-primary,#2f9e6b)}',
+      '.dslb-dot[data-on="0"]{background:var(--dsw-alias-border-l2,rgba(128,128,128,.4))}',
+      '.dslb-side{display:flex;align-items:center;gap:8px;flex:none}',
+
+      /* ---------- sub-cards: inbound / outbound / pairing ---------- */
+      '.dslb-subcard{display:flex;flex-direction:column;gap:6px;box-sizing:border-box;padding:8px 10px;min-width:0;',
+      'border:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));border-radius:var(--dsw-radius-lg,8px)}',
+      '.dslb-subHead{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}',
+      '.dslb-subTitle{font-size:12px;line-height:18px;font-weight:500;',
+      'color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-pairRow{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;flex-wrap:wrap}',
+      '.dslb-subHint{margin:0;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+
+      /* ---------- one-time token ---------- */
+      '.dslb-token{display:flex;flex-direction:column;gap:8px;box-sizing:border-box;padding:12px;min-width:0;',
+      'border:0.5px dashed var(--dsw-alias-border-l2,rgba(128,128,128,.3));border-radius:var(--dsw-radius-lg,8px);',
+      'background:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.06))}',
+      '.dslb-tokenTitle{font-size:14px;line-height:20px;font-weight:500}',
+      '.dslb-tokenRow{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.dslb-tokenRow .dslb-input{flex:1 1 auto;min-width:0;text-overflow:ellipsis;',
+      'font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}',
+
+      /* ---------- sticky save bar ---------- */
+      '.dslb-saveBar{position:sticky;bottom:0;z-index:1;display:flex;align-items:center;justify-content:space-between;',
+      'gap:12px;box-sizing:border-box;margin:0 -14px -12px;padding:10px 14px;',
+      'border-top:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));',
+      'border-radius:0 0 var(--dsw-radius-xl,12px) var(--dsw-radius-xl,12px);',
+      'background:var(--dsw-alias-settings-card-fill,var(--dsw-alias-bg-layer-1,transparent))}',
+      '.dslb-saveMain{display:flex;align-items:center;gap:8px;min-width:0}',
+      '.dslb-dirty{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-state-warn-primary,#c98a00);',
+      'background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#c98a00) 12%,transparent)}',
+      '.dslb-ok{font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary,#2f9e6b)}',
+
+      /* ---------- empty states, warnings, errors ---------- */
+      '.dslb-empty{display:flex;flex-direction:column;gap:2px;padding:4px 0;min-width:0}',
+      '.dslb-emptyTitle{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-emptyNext{font-size:12px;line-height:18px;',
+      'color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary,#6b7280))}',
+      '.dslb-warn{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-warn-primary,#c98a00);',
+      'overflow-wrap:anywhere}',
+      '.dslb-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;box-sizing:border-box;',
+      'padding:8px 10px;border-radius:var(--dsw-radius-md,8px);',
+      'border:0.5px solid var(--dsw-alias-state-error-primary,#d64545);',
+      'background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d64545) 8%,transparent);',
+      'color:var(--dsw-alias-state-error-primary,#d64545);font-size:12px;line-height:18px;overflow-wrap:anywhere}',
+      '.dslb-loading{padding:4px 0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '@media (prefers-reduced-motion:reduce){.dslb-switch::after,.dslb-switch,.dslb-btn{transition:none}}',
     ].join('')
 
     /** Reading of a thrown value; never throws itself. */
@@ -411,6 +571,22 @@ window.__ModuleLoader__.load({
       const port = typeof listen.port === 'number' && Number.isFinite(listen.port)
         ? String(listen.port)
         : text(listen.port, '')
+      // Top-level `discovery` is the mDNS agent's own status (distinct from
+      // `settings.discovery`, the operator's switch). A Host older than the
+      // panel has neither, so absence is a normal, quiet state.
+      const agent = record(root.discovery)
+      const agentError = agent === null ? '' : text(agent.error, '')
+      const found = agent === null ? [] : list(agent.found).map((entry) => {
+        const peer = record(entry)
+        if (peer === null) return null
+        const name = text(peer.name, '')
+        const host = text(peer.host, '')
+        const address = text(peer.address, '')
+        if (name === '' && host === '' && address === '') return null
+        const port = typeof peer.port === 'number' && Number.isFinite(peer.port) ? String(peer.port) : text(peer.port, '')
+        return { name, host, address, port, version: text(peer.version, '') }
+      }).filter((peer) => peer !== null)
+
       return {
         role: text(root.role, ''),
         name: text(root.name, ''),
@@ -424,6 +600,13 @@ window.__ModuleLoader__.load({
         settings: normalizeSettings(root, listen),
         addresses: list(root.addresses).map((value) => text(value, '')).filter((value) => value !== ''),
         restartRequired: root.restartRequired === true,
+        discovery: {
+          known: agent !== null,
+          enabled: agent !== null && agent.enabled === true,
+          listening: agent !== null && agent.listening === true,
+          error: agentError,
+          found,
+        },
         inbound: list(root.inbound).map((entry) => {
           const peer = record(entry)
           if (peer === null) return null
@@ -800,16 +983,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** A read-only machine field. */
-    function Field(props) {
-      return h('div', { className: 'dslb-field' },
-        h('span', { className: 'dslb-fieldKey' }, props.label),
-        h('span', {
-          className: 'dslb-fieldValue',
-          title: props.title === undefined ? props.value : props.title,
-        }, props.value === '' ? props.t('empty') : props.value))
-    }
-
     /** A settings switch: native button semantics, no primitive dependency. */
     function Switch(props) {
       return h('button', {
@@ -825,25 +998,91 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** This machine's identity: read-only, no controls. */
-    function ThisMachine(props) {
+    /** A card: the one container every block of this page uses. */
+    function Card(props) {
+      return h('section', { className: 'dslb-card' },
+        h('div', { className: 'dslb-cardHead' },
+          h('div', { className: 'dslb-cardHeadMain' },
+            h('h3', { className: 'dslb-cardTitle' }, props.title),
+            props.hint === undefined || props.hint === ''
+              ? null
+              : h('p', { className: 'dslb-cardHint' }, props.hint)),
+          props.actions === undefined ? null : h('div', { className: 'dslb-cardActions' }, props.actions)),
+        props.children)
+    }
+
+    /** An empty state: what is missing, plus the next step that fills it. */
+    function Empty(props) {
+      return h('div', { className: 'dslb-empty' },
+        h('span', { className: 'dslb-emptyTitle' }, props.title),
+        props.next === undefined || props.next === ''
+          ? null
+          : h('span', { className: 'dslb-emptyNext' }, props.next))
+    }
+
+    /**
+     * 1. The status card: what this machine looks like to the LAN right now —
+     * its advertised name, the role it plays, whether the listener is up and
+     * on which surface, and the address to hand to the other machine.
+     */
+    function StatusHero(props) {
       const { data, t } = props
       const listen = data.listen
       const address = listenLabel(listen)
       const live = listen.protocol === '' || address === '' ? address : `${listen.protocol}://${address}`
-      // A listener that is down but still has a configured address is reported
-      // as both, so "not listening" never hides where it was supposed to be.
-      const shown = listen.listening === false
+      const down = listen.listening === false
+      const tls = data.settings.tls !== null || listen.protocol === 'https'
+      // Plaintext is only worth flagging when the listener is actually reachable
+      // from the LAN: loopback traffic never leaves this machine.
+      const exposure = tls ? t('tlsShort') : (isLoopbackHost(listen.host) ? '' : t('plainHttp'))
+      const parts = []
+      if (!down && listen.listening === true) parts.push(t('listening'))
+      if (!down && address !== '') parts.push(address)
+      if (!down && exposure !== '') parts.push(exposure)
+      const line = down
         ? (address === '' ? t('settingsNotListening') : `${address} · ${t('settingsNotListening')}`)
-        : live
-      return h('div', { className: 'dslb-group' },
-        h('div', { className: 'dslb-groupTitle' }, t('thisMachine')),
-        h(Field, { label: t('role'), value: roleLabel(data.role, t), t }),
-        h(Field, { label: t('peerName'), value: data.name, t }),
-        h(Field, { label: t('listen'), value: shown, t }),
+        : (parts.length === 0 ? t('empty') : parts.join(' · '))
+      const state = down ? 'off' : (listen.listening === true ? 'on' : 'idle')
+      const [copyState, setCopyState] = React.useState('idle')
+
+      const copy = () => {
+        const value = live === '' ? address : live
+        if (value === '') return
+        if (typeof navigator === 'undefined' || navigator.clipboard === undefined) {
+          setCopyState('failed')
+          return
+        }
+        void navigator.clipboard.writeText(value)
+          .then(() => setCopyState('done'))
+          .catch(() => setCopyState('failed'))
+      }
+
+      return h('section', { className: 'dslb-card', 'aria-label': t('thisMachine') },
+        h('div', { className: 'dslb-hero' },
+          h('div', { className: 'dslb-heroMain' },
+            h('div', { className: 'dslb-heroName' },
+              h('span', { className: 'dslb-heroNameText', title: t('peerName') },
+                data.name === '' ? t('empty') : data.name),
+              h('span', { className: 'dslb-pill', title: t('role') }, roleLabel(data.role, t))),
+            h('div', {
+              className: 'dslb-statusLine',
+              role: 'group',
+              'aria-label': `${t('listen')}: ${line}`,
+            },
+              h('span', { className: 'dslb-liveDot', 'data-state': state, 'aria-hidden': 'true' }),
+              h('span', { className: 'dslb-statusText', title: line }, line))),
+          h('div', { className: 'dslb-heroSide' },
+            live === '' ? null : h('span', { className: 'dslb-addr', title: live }, live),
+            h('button', {
+              type: 'button',
+              className: 'dslb-btn',
+              'aria-label': t('copyAddress'),
+              disabled: live === '',
+              onClick: copy,
+            }, copyState === 'done' ? t('copied') : (copyState === 'failed' ? t('copyFailed') : t('copy'))))),
         listen.error === ''
           ? null
-          : h('div', { className: 'dslb-warn', role: 'alert' },
+          : h('p', { className: 'dslb-warn', role: 'alert' },
             t('settingsListenError', { message: listen.error })))
     }
 
@@ -864,19 +1103,6 @@ window.__ModuleLoader__.load({
       const [saving, setSaving] = React.useState(false)
       const [failure, setFailure] = React.useState(null)
       const [saved, setSaved] = React.useState(false)
-
-      // Peers this machine heard over mDNS, for the hint chips under the switch.
-      // `discovery` is absent on a Host older than the panel (the panel bundle
-      // reloads from disk while Host code needs a restart), so every read here
-      // has to survive its absence: a throw would blank the whole section.
-      const discovery = record(data.discovery)
-      const found = discovery === null ? [] : discovery.found
-      const discovered = Array.isArray(found)
-        ? found.map((entry) => ({
-          name: text(record(entry).name, '?'),
-          url: text(record(entry).url, ''),
-        })).filter((entry) => entry.url !== '')
-        : []
 
       const draftRef = React.useRef(draft)
       draftRef.current = draft
@@ -987,11 +1213,18 @@ window.__ModuleLoader__.load({
       const showAssigned = settings.port === 0 && assigned !== ''
       const assignedDraft = draft.port.trim() === '0' && assigned !== ''
 
-      return h('div', { className: 'dslb-group' },
-        h('div', { className: 'dslb-groupTitle' }, t('settingsTitle')),
-        h('div', { className: 'dslb-hint' }, t('settingsHint')),
+      // 2. The listener card. Every rule the Host enforces is mirrored inline,
+      // but only the three that make a save meaningless (no name, no address, a
+      // half-filled TLS pair, a port that is not a port) disable the button; a
+      // plaintext bind is allowed to be attempted so the Host's own sentence is
+      // what explains the refusal.
+      return h('section', { className: 'dslb-card' },
+        h('div', { className: 'dslb-cardHead' },
+          h('div', { className: 'dslb-cardHeadMain' },
+            h('h3', { className: 'dslb-cardTitle' }, t('settingsTitle')),
+            h('p', { className: 'dslb-cardHint' }, t('settingsHint')))),
 
-        h('div', { className: 'dslb-formGrid' },
+        h('div', { className: 'dslb-formStack' },
           h('label', { className: 'dslb-formField' },
             h('span', { className: 'dslb-formLabel' }, t('settingsName')),
             h('input', {
@@ -1048,36 +1281,29 @@ window.__ModuleLoader__.load({
             onClick: () => update('host', value),
           }, value))),
 
-        h('div', { className: 'dslb-row', 'data-quiet': '1' },
-          h('div', { className: 'dslb-main' },
-            h('div', { className: 'dslb-title' }, t('settingsAllowCreate')),
-            h('div', { className: 'dslb-desc' }, t('settingsAllowCreateHint'))),
-          h(Switch, {
-            checked: draft.allowPeersToCreateSessions,
-            label: t('settingsAllowCreate'),
-            disabled: saving,
-            onChange: () => update('allowPeersToCreateSessions', !draft.allowPeersToCreateSessions),
-          })),
+        h('div', { className: 'dslb-list' },
+          h('div', { className: 'dslb-toggleRow' },
+            h('div', { className: 'dslb-main' },
+              h('div', { className: 'dslb-title' }, t('settingsAllowCreate')),
+              h('div', { className: 'dslb-desc' }, t('settingsAllowCreateHint'))),
+            h(Switch, {
+              checked: draft.allowPeersToCreateSessions,
+              label: t('settingsAllowCreate'),
+              disabled: saving,
+              onChange: () => update('allowPeersToCreateSessions', !draft.allowPeersToCreateSessions),
+            })),
+          h('div', { className: 'dslb-toggleRow' },
+            h('div', { className: 'dslb-main' },
+              h('div', { className: 'dslb-title' }, t('settingsDiscovery')),
+              h('div', { className: 'dslb-desc' }, t('settingsDiscoveryHint'))),
+            h(Switch, {
+              checked: draft.discovery,
+              label: t('settingsDiscovery'),
+              disabled: saving,
+              onChange: () => update('discovery', !draft.discovery),
+            }))),
 
-        h('div', { className: 'dslb-row', 'data-quiet': '1' },
-          h('div', { className: 'dslb-main' },
-            h('div', { className: 'dslb-title' }, t('settingsDiscovery')),
-            h('div', { className: 'dslb-desc' }, t('settingsDiscoveryHint'))),
-          h(Switch, {
-            checked: draft.discovery,
-            label: t('settingsDiscovery'),
-            disabled: saving,
-            onChange: () => update('discovery', !draft.discovery),
-          })),
-
-        discovered.length > 0
-          ? h('div', { className: 'dslb-chips' }, discovered.map((entry) => h('span', {
-            key: `${entry.name}:${entry.url}`,
-            className: 'dslb-chip',
-          }, `${entry.name} · ${entry.url}`)))
-          : null,
-
-        h('div', { className: 'dslb-formGrid' },
+        h('div', { className: 'dslb-formStack' },
           h('label', { className: 'dslb-formField' },
             h('span', { className: 'dslb-formLabel' }, t('settingsTrustedHosts')),
             h('input', {
@@ -1112,7 +1338,7 @@ window.__ModuleLoader__.load({
               'aria-label': t('settingsTlsKey'),
               onChange: (event) => update('keyFile', event.currentTarget.value),
             }))),
-        h('div', { className: 'dslb-formHint' }, t('settingsTlsHint')),
+        h('p', { className: 'dslb-formHint' }, t('settingsTlsHint')),
 
         h('label', { className: 'dslb-check' },
           h('input', {
@@ -1123,24 +1349,17 @@ window.__ModuleLoader__.load({
           }),
           h('span', null, t('settingsInsecure'))),
         insecureWarn
-          ? h('div', { className: 'dslb-warn', role: 'note' }, t('settingsInsecureWarning'))
+          ? h('p', { className: 'dslb-warn', role: 'note' }, t('settingsInsecureWarning'))
           : null,
 
-        problem === '' ? null : h('div', { className: 'dslb-warn', role: 'note' }, t(problem)),
-
+        problem === '' ? null : h('p', { className: 'dslb-warn', role: 'note' }, t(problem)),
         listenChanged
-          ? h('div', { className: 'dslb-warn', role: 'note' }, t('settingsListenWarning'))
+          ? h('p', { className: 'dslb-warn', role: 'note' }, t('settingsListenWarning'))
           : null,
-        h('div', { className: 'dslb-form' },
-          h('button', {
-            type: 'button',
-            className: 'dslb-btn',
-            'data-tone': 'primary',
-            disabled: !canSave,
-            title: canSave ? undefined : t('settingsSaveBlocked'),
-            onClick: save,
-          }, saving ? t('settingsSaving') : t('settingsSave'))),
-        saved && !dirty ? h('div', { className: 'dslb-ok', role: 'status' }, t('settingsSaved')) : null,
+        data.restartRequired
+          ? h('p', { className: 'dslb-warn', role: 'note' }, t('settingsRestartRequired'))
+          : null,
+
         failure === null
           ? null
           : h('div', { className: 'dslb-alert', role: 'alert' },
@@ -1152,9 +1371,21 @@ window.__ModuleLoader__.load({
               className: 'dslb-btn',
               onClick: () => setFailure(null),
             }, t('dismiss'))),
-        data.restartRequired
-          ? h('div', { className: 'dslb-warn', role: 'note' }, t('settingsRestartRequired'))
-          : null)
+
+        h('div', { className: 'dslb-saveBar' },
+          h('div', { className: 'dslb-saveMain' },
+            dirty ? h('span', { className: 'dslb-dirty' }, t('settingsDirty')) : null,
+            saved && !dirty
+              ? h('span', { className: 'dslb-ok', role: 'status' }, t('settingsSaved'))
+              : null),
+          h('button', {
+            type: 'button',
+            className: 'dslb-btn',
+            'data-tone': 'primary',
+            disabled: !canSave,
+            title: canSave ? undefined : t('settingsSaveBlocked'),
+            onClick: save,
+          }, saving ? t('settingsSaving') : t('settingsSave'))))
     }
 
     /**
@@ -1184,15 +1415,16 @@ window.__ModuleLoader__.load({
           })))
     }
 
-    /** The sharing switches: the panel's main decision surface. */
+    /**
+     * 4. The sharing switches: the panel's main decision surface. A toggle is
+     * optimistic and reverts, naming the Host's reason in the row.
+     */
     function Sessions(props) {
       const { data, t, overrides, pending, failures, onToggle } = props
-      return h('div', { className: 'dslb-group' },
-        h('div', { className: 'dslb-groupTitle' }, t('sessions')),
-        h('div', { className: 'dslb-hint' }, t('sessionsHint')),
+      return h(Card, { title: t('sessions'), hint: t('sessionsHint') },
         data.sessions.length === 0
-          ? h('div', { className: 'dslb-empty' }, t('noSessions'))
-          : data.sessions.map((session) => {
+          ? h(Empty, { title: t('noSessions'), next: t('noSessionsNext') })
+          : h('div', { className: 'dslb-list' }, data.sessions.map((session) => {
             const id = session.sessionId
             const shared = Object.prototype.hasOwnProperty.call(overrides, id) ? overrides[id] : session.shared
             return h(SessionRow, {
@@ -1204,7 +1436,7 @@ window.__ModuleLoader__.load({
               t,
               onToggle,
             })
-          }))
+          })))
     }
 
     /** One inbound peer: masked token, heartbeat, capabilities, revocation. */
@@ -1353,7 +1585,22 @@ window.__ModuleLoader__.load({
         setCopyState('idle')
       }
 
-      return h('div', { className: 'dslb-group' },
+      const startPairing = () => {
+        setOpen(true)
+        setFailure('')
+      }
+      return h('div', { className: 'dslb-subcard' },
+        open || issued !== null
+          ? h('div', { className: 'dslb-subHead' },
+            h('span', { className: 'dslb-subTitle' }, t('pair')))
+          : h('div', { className: 'dslb-pairRow' },
+            h('p', { className: 'dslb-subHint' }, t('pairHint')),
+            h('button', {
+              type: 'button',
+              className: 'dslb-btn',
+              onClick: startPairing,
+            }, t('pair'))),
+
         issued === null ? null : h('div', { className: 'dslb-token' },
           h('div', { className: 'dslb-tokenTitle' }, t('tokenTitle')),
           h('div', { className: 'dslb-desc' }, t('tokenFor', { name: issued.name })),
@@ -1372,10 +1619,13 @@ window.__ModuleLoader__.load({
             }),
             h('button', { type: 'button', className: 'dslb-btn', onClick: copy },
               copyState === 'done' ? t('copied') : t('copy'))),
-          h('div', { className: 'dslb-warn', role: 'note' }, t('tokenOnce')),
-          copyState === 'failed' ? h('div', { className: 'dslb-warn', role: 'alert' }, t('copyFailed')) : null,
+          h('p', { className: 'dslb-warn', role: 'note' }, t('tokenOnce')),
+          copyState === 'failed'
+            ? h('p', { className: 'dslb-warn', role: 'alert' }, t('copyFailed'))
+            : null,
           h('div', { className: 'dslb-side' },
             h('button', { type: 'button', className: 'dslb-btn', onClick: dismiss }, t('dismiss')))),
+
         failure === '' ? null : h('div', { className: 'dslb-alert', role: 'alert' },
           h('span', null, failure),
           h('button', {
@@ -1383,22 +1633,25 @@ window.__ModuleLoader__.load({
             className: 'dslb-btn',
             onClick: () => setFailure(''),
           }, t('dismiss'))),
+
         open
-          ? h('div', { className: 'dslb-form' },
-            h('input', {
-              ref: inputRef,
-              className: 'dslb-input',
-              value: name,
-              placeholder: t('pairPlaceholder'),
-              'aria-label': t('pairPlaceholder'),
-              spellCheck: false,
-              disabled: busy,
-              onChange: (event) => setName(event.currentTarget.value),
-              onKeyDown: (event) => {
-                if (event.key === 'Enter') submit()
-                if (event.key === 'Escape' && !busy) setOpen(false)
-              },
-            }),
+          ? h('div', { className: 'dslb-formStack' },
+            h('div', { className: 'dslb-formField' },
+              h('span', { className: 'dslb-formLabel' }, t('pairPlaceholder')),
+              h('input', {
+                ref: inputRef,
+                className: 'dslb-input',
+                value: name,
+                placeholder: t('pairPlaceholder'),
+                'aria-label': t('pairPlaceholder'),
+                spellCheck: false,
+                disabled: busy,
+                onChange: (event) => setName(event.currentTarget.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') submit()
+                  if (event.key === 'Escape' && !busy) setOpen(false)
+                },
+              })),
             h('div', { className: 'dslb-chipsPick', 'aria-label': t('pairCapabilities') },
               h('span', { className: 'dslb-chipsPickLabel' }, t('pairCapabilities')),
               PAIR_CAPABILITIES.map((capability) => h('button', {
@@ -1410,32 +1663,26 @@ window.__ModuleLoader__.load({
                 disabled: busy,
                 onClick: () => toggle(capability),
               }, capabilityLabel(capability, t)))),
-            h('span', { className: 'dslb-formHint' }, t('pairCapHint')),
-            h('button', {
-              type: 'button',
-              className: 'dslb-btn',
-              'data-tone': 'primary',
-              disabled: busy,
-              onClick: submit,
-            }, t('pairSubmit')),
-            h('button', {
-              type: 'button',
-              className: 'dslb-btn',
-              disabled: busy,
-              onClick: () => {
-                setOpen(false)
-                setFailure('')
-              },
-            }, t('pairCancel')))
-          : h('div', { className: 'dslb-form' },
-            h('button', {
-              type: 'button',
-              className: 'dslb-btn',
-              onClick: () => {
-                setOpen(true)
-                setFailure('')
-              },
-            }, t('pair'))))
+            h('p', { className: 'dslb-formHint' }, t('pairCapHint')),
+            h('div', { className: 'dslb-side' },
+              h('button', {
+                type: 'button',
+                className: 'dslb-btn',
+                'data-tone': 'primary',
+                disabled: busy,
+                onClick: submit,
+              }, t('pairSubmit')),
+              h('button', {
+                type: 'button',
+                className: 'dslb-btn',
+                disabled: busy,
+                onClick: () => {
+                  setOpen(false)
+                  setFailure('')
+                },
+              }, t('pairCancel'))))
+          : null)
+
     }
 
     /** The peer inventory and everything that changes it. */
@@ -1462,27 +1709,86 @@ window.__ModuleLoader__.load({
           })
       }
 
-      return h('div', { className: 'dslb-group' },
-        h('div', { className: 'dslb-groupTitle' }, t('peers')),
-        h('div', { className: 'dslb-hint' }, t('inbound')),
-        data.inbound.length === 0
-          ? h('div', { className: 'dslb-empty' }, t('noInbound'))
-          : data.inbound.map((peer) => h(InboundRow, {
-            key: peer.name,
-            peer,
-            t,
-            confirming: confirming === peer.name,
-            busy: busy === peer.name,
-            failure: text(failure[peer.name], ''),
-            onAsk: () => setConfirming(peer.name),
-            onCancel: () => setConfirming(''),
-            onRevoke: revoke,
-          })),
-        h('div', { className: 'dslb-groupTitle' }, t('outbound')),
-        data.outbound.length === 0
-          ? h('div', { className: 'dslb-empty' }, t('noOutbound'))
-          : data.outbound.map((peer) => h(OutboundRow, { key: peer.name, peer, t })),
+      // 3. Peer inventory. Issuing and revoking credentials lives here because
+      // both sides of a pairing are one decision, and the token is only ever on
+      // screen in this card.
+      return h(Card, { title: t('peers'), hint: t('peersHint') },
+        h('div', { className: 'dslb-subcard' },
+          h('div', { className: 'dslb-subHead' },
+            h('span', { className: 'dslb-subTitle' }, t('inbound')),
+            h('span', { className: 'dslb-subHint' }, t('inboundHint'))),
+          data.inbound.length === 0
+            ? h(Empty, { title: t('noInbound'), next: t('noInboundNext') })
+            : h('div', { className: 'dslb-list' }, data.inbound.map((peer) => h(InboundRow, {
+              key: peer.name,
+              peer,
+              t,
+              confirming: confirming === peer.name,
+              busy: busy === peer.name,
+              failure: text(failure[peer.name], ''),
+              onAsk: () => setConfirming(peer.name),
+              onCancel: () => setConfirming(''),
+              onRevoke: revoke,
+            })))),
+        h('div', { className: 'dslb-subcard' },
+          h('div', { className: 'dslb-subHead' },
+            h('span', { className: 'dslb-subTitle' }, t('outbound')),
+            h('span', { className: 'dslb-subHint' }, t('outboundHint'))),
+          data.outbound.length === 0
+            ? h(Empty, { title: t('noOutbound'), next: t('noOutboundNext') })
+            : h('div', { className: 'dslb-list' }, data.outbound.map((peer) => h(OutboundRow, {
+              key: peer.name,
+              peer,
+              t,
+            })))),
         h(Pairing, { t, reload }))
+    }
+
+    /** Where a discovered machine answers: address first, then host. */
+    function placeLabel(peer) {
+      const host = peer.address === '' ? peer.host : peer.address
+      if (host === '') return ''
+      return peer.port === '' ? host : `${host}:${peer.port}`
+    }
+
+    /**
+     * 5. Neighbours heard over mDNS. Read-only on purpose: a discovered machine
+     * is not trusted yet, so the only way to act on one is to pair it by hand.
+     */
+    function Discovery(props) {
+      const { data, t } = props
+      const discovery = data.discovery
+      let body = null
+      if (discovery.known === false || discovery.enabled === false) {
+        body = h(Empty, { title: t('noDiscoveryOff'), next: t('noDiscoveryNext') })
+      } else if (discovery.found.length === 0) {
+        body = h(Empty, { title: t('noDiscovery'), next: t('noDiscoveryNext') })
+      } else {
+        body = h('div', { className: 'dslb-list' }, discovery.found.map((peer, index) => h('div', {
+          key: `${peer.name}:${placeLabel(peer)}:${index}`,
+          className: 'dslb-row',
+          'data-quiet': '1',
+        },
+        h('div', { className: 'dslb-main' },
+          h('div', { className: 'dslb-title' },
+            h('span', { className: 'dslb-name' }, peer.name === '' ? t('empty') : peer.name)),
+          h('div', { className: 'dslb-desc' },
+            h('span', { className: 'dslb-mono' }, placeLabel(peer)))),
+        peer.version === ''
+          ? null
+          : h('div', { className: 'dslb-side' },
+            h('span', { className: 'dslb-chip' }, `v${peer.version}`)))))
+      }
+      return h(Card, {
+        title: t('settingsDiscovery'),
+        hint: discovery.error === '' ? t('discoveryFoundHint') : '',
+      },
+      h(React.Fragment, null,
+        body,
+        discovery.error === ''
+          ? null
+          : h('p', { className: 'dslb-warn', role: 'note' },
+            t('discoveryError', { message: discovery.error }))))
     }
 
     /** The registered section: the panel, contained by its render boundary. */
@@ -1538,11 +1844,12 @@ window.__ModuleLoader__.load({
           })
       }, [reload, t])
 
+      // The page head names the surface; the cards below do the talking.
       const header = h(React.Fragment, null,
         h('style', { key: 'dslb-style' }, CSS),
-        h('div', { className: 'dslb-group' },
-          h('div', { className: 'dslb-groupTitle' }, t('title')),
-          h('div', { className: 'dslb-hint' }, t('subtitle'))))
+        h('div', { className: 'dslb-pageHead', key: 'dslb-head' },
+          h('h2', { className: 'dslb-pageTitle' }, t('title')),
+          h('p', { className: 'dslb-pageSub' }, t('subtitle'))))
 
       if (data === null) {
         if (state.phase === 'error') {
@@ -1557,13 +1864,17 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dslb-loading' }, t('loading')))
       }
 
+      // Order is the operator's question order: what is this machine doing,
+      // how do I change it, who can reach it, which Sessions are exposed, who
+      // is out there.
       return h('div', { className: 'dslb-root', ref: rootRef },
         header,
         h(ErrorBar, { message: state.error, t, onRetry: () => reload() }),
+        h(StatusHero, { data, t }),
         h(ListenSettings, { data, t, applyState }),
-        h(ThisMachine, { data, t }),
+        h(Peers, { data, t, reload }),
         h(Sessions, { data, t, overrides, pending, failures, onToggle: toggle }),
-        h(Peers, { data, t, reload }))
+        h(Discovery, { data, t }))
     }
 
     /**
