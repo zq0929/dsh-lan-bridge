@@ -50,7 +50,7 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.4.0", "name": "my-mac",
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.4.1", "name": "my-mac",
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -312,8 +312,11 @@ Rules, in the order they are checked: capability → `files.enabled` → the roo
 writes) is `writable` → every path segment → the resolved parent still inside the root after
 `realpath` → the size limit. Rejected segments include `..`, `.`, empty, absolute paths, drive
 letters, backslashes, trailing dots/spaces, control characters, and Windows device names
-(`CON`, `NUL`, `COM1`…). Anything that resolves outside a root — including a symlink whose own
-name looks fine — is `bridge/forbidden`.
+(`CON`, `NUL`, `COM1`…). A malformed path is `bridge/bad-request` (details carry
+`field: "path"`): the request is wrong, and no extra capability would fix it. Anything that
+resolves outside a root — including a symlink whose own name looks fine — is
+`bridge/forbidden`; a read-only root is `bridge/forbidden` too, and a target that already
+exists without `overwrite: true` is `bridge/conflict`.
 
 `files.begin` fails fast: unknown root (`bridge/not-found`), oversized (`bridge/bad-request`), and
 an existing target without `overwrite: true` (`bridge/conflict`). Bytes are staged under

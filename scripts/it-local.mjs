@@ -1612,12 +1612,15 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('list marks a file as a file', listing.entries[0].isDirectory, false)
 
   // Path discipline: every one of these must be refused before the disk is touched.
-  await filesFail('files.stat', { root: 'drop', path: '../outside.txt' }, 'bridge/forbidden')
-  await filesFail('files.stat', { root: 'drop', path: '/etc/passwd' }, 'bridge/forbidden')
-  await filesFail('files.stat', { root: 'drop', path: 'C:/Windows/win.ini' }, 'bridge/forbidden')
-  await filesFail('files.stat', { root: 'drop', path: 'docs\\hello.txt' }, 'bridge/forbidden')
-  await filesFail('files.stat', { root: 'drop', path: 'nul' }, 'bridge/forbidden')
-  await filesFail('files.stat', { root: 'drop', path: 'docs/hello.txt.' }, 'bridge/forbidden')
+  // A malformed path is bridge/bad-request — it is the caller's request that is
+  // wrong, and the remedy is not "go grant more capability".
+  await filesFail('files.stat', { root: 'drop', path: '../outside.txt' }, 'bridge/bad-request')
+  await filesFail('files.stat', { root: 'drop', path: '/etc/passwd' }, 'bridge/bad-request')
+  await filesFail('files.stat', { root: 'drop', path: 'C:/Windows/win.ini' }, 'bridge/bad-request')
+  await filesFail('files.stat', { root: 'drop', path: 'docs\\hello.txt' }, 'bridge/bad-request')
+  await filesFail('files.stat', { root: 'drop', path: 'nul' }, 'bridge/bad-request')
+  await filesFail('files.stat', { root: 'drop', path: 'docs/hello.txt.' }, 'bridge/bad-request')
+  await filesFail('files.stat', { root: 'drop', path: 'docs/CON.txt' }, 'bridge/bad-request')
   await filesFail('files.stat', { root: 'nope', path: 'x.txt' }, 'bridge/not-found')
   // A symlink that points outside the root resolves outside it, so it is refused
   // even though its own name looks innocent.
@@ -1713,8 +1716,26 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   check('tool list sees the pushed file', listedTool.entries.some(entry => entry.name === 'note.txt'), JSON.stringify(listedTool.entries.map(entry => entry.name)))
   const statTool = await execTool('lan_dsh_files', { peer: 'self-files', action: 'stat', root: 'drop', path: 'docs/note.txt' })
   equal('tool stat reports the size', statTool.entry.size, Buffer.byteLength('pushed through the tool\n'))
-  const pushForbidden = await execTool('lan_dsh_push_file', { peer: 'self-files', localPath: textPath, root: 'readonly', remotePath: 'nope.txt' }).then(() => undefined, error => error)
-  check('tool push into a read-only root explains the grant', pushForbidden instanceof Error && String(pushForbidden.message).includes('files'), String(pushForbidden))
+  // A read-only root is not a capability problem, so the tool must not send the
+  // caller off to grant `files` — the peer reported that confusion in the field.
+  const readOnlyPush = await execTool('lan_dsh_push_file', { peer: 'self-files', localPath: textPath, root: 'readonly', remotePath: 'nope.txt' }).then(() => undefined, error => error)
+  check('read-only root says so', readOnlyPush instanceof Error && /read-only/.test(String(readOnlyPush.message)), String(readOnlyPush))
+  check('read-only root does not advertise a grant',
+    readOnlyPush instanceof Error && !String(readOnlyPush.message).includes('action=grant'), String(readOnlyPush))
+  // A bad path is the caller's mistake too: still no grant advice.
+  const pathPush = await execTool('lan_dsh_push_file', { peer: 'self-files', localPath: textPath, root: 'drop', remotePath: '../escape.txt' }).then(() => undefined, error => error)
+  check('bad path is a bad request', pathPush instanceof Error && pathPush.code === 'bridge/bad-request', String(pathPush?.code))
+  check('bad path does not advertise a grant',
+    pathPush instanceof Error && !String(pathPush.message).includes('action=grant'), String(pathPush))
+  // A real capability refusal keeps the hint, because that one is actionable.
+  const weakToken = (await store.pair({ name: 'files-weak', capabilities: ['read', 'prompt'] })).token
+  await store.addOutbound({ name: 'self-weak', url: filesUrl, token: weakToken })
+  const forbiddenPush = await execTool('lan_dsh_push_file', { peer: 'self-weak', localPath: textPath, root: 'drop', remotePath: 'docs/denied.txt' }).then(() => undefined, error => error)
+  check('missing files capability is forbidden', forbiddenPush instanceof Error && forbiddenPush.code === 'bridge/forbidden', String(forbiddenPush?.code))
+  check('missing files capability explains the grant',
+    forbiddenPush instanceof Error && String(forbiddenPush.message).includes('action=grant'), String(forbiddenPush))
+  await store.removeOutbound('self-weak')
+  await store.revoke('files-weak')
   await store.removeOutbound('self-files')
   await store.revoke('files-peer')
   await store.revoke('files-reader')

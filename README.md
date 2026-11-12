@@ -203,7 +203,9 @@ lan_dsh_pull_file { peer: "b-mac", root: "workspace",
 
 规则：
 
-- 线上只传 `{ root, path }`，`path` 是 POSIX 风格相对路径；**绝对路径、盘符、`..`、Windows 设备名一律拒绝**，
+- 线上只传 `{ root, path }`，`path` 是 POSIX 风格相对路径；**绝对路径、盘符、`..`、Windows 设备名一律拒绝**
+  （这类是 `bridge/bad-request`：请求本身不对，不是权限问题；只有真缺 `files` 能力时错误里才会带
+  “去 grant” 的提示），
   解析后再用 `realpath` 复核，符号链接逃逸也是 `bridge/forbidden`。
 - 分块 base64（默认 256 KiB/块），`files.begin` 就先拒掉未知根、越界路径、超限大小、已存在的目标，
   不会先把带宽浪费掉再报错。
