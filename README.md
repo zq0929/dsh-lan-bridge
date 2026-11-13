@@ -359,6 +359,22 @@ discovered over mDNS:
 - **审计**：`lan_dsh_audit { limit: 20 }` 读本机尾迹（对端在我这里做过什么），`{ peer: "windows" }` 读对方的；面板最后一张卡直接列出最近 20 行，可展开。文件与路径只写在**执行那一侧**的 `audit.jsonl`。
 - **批量传输**：`lan_dsh_push_files` / `lan_dsh_pull_files` 一次给一组 `{localPath, remotePath}`，逐文件独立走 begin/chunk/commit，单文件失败不中断其余，返回 `{sent, failed, results[]}`。不是目录递归——要整棵树请先打包。
 
+## 0.5.2：交叉审计修掉的东西
+
+两台机器互相审了一遍，找出五个真问题，全部已修（都有回归测试）：
+
+| # | 问题 | 修法 |
+|---|---|---|
+| 1 | `pair.mirror` 只按全局能力表过滤，**不与调用者自身能力求交**；`autoAcceptMirror` 一开，一枚 `read` 令牌就能要走 `approve`/`files` | 能力必须 ⊆ 调用者已持有的能力；`autoAcceptMirror` 只自动接受 `read`/`prompt`，更高权限留在面板待人工接受 |
+| 2 | `requestMirror` 先重签令牌再发请求，**发失败时对方还拿着死令牌**；并发 accept 会各铸一枚 | 失败回滚到旧令牌；镜像操作按机器名串行 |
+| 3 | commit 用 `rename` 跨卷必失败（Windows 上 staging 与根常在两个盘），上传僵在 staging 且该 peer 之后一直 `rate-limited` | 跨卷时改为「复制到目标目录再改名」，失败路径清掉挂起记录 |
+| 4 | `overwrite: false` 只在 `begin` 检查，**commit 无条件覆盖**中途出现的文件 | commit 重新检查，冲突返回 `bridge/conflict` 且不动原文件 |
+| 5 | 审批代答只要有人被授过 `approve` 就静默等满预算（默认 120 s），操作员屏幕上看不到弹窗 | 默认降到 20 s，且要求该 peer 10 分钟内确实来过；预算用尽即落回本地弹窗 |
+
+另外两处自查：单次 `session.wait` 超过 300 s 会被 fetch 栈判成「对方离线」（现在工具层切片、单次调用上限 240 s）；`waitForTurn` 原先每 200 ms 全量快照一次会话历史（现在按状态变化读，最多每秒一次）。
+
+**已知未修**：8.3 短名（`LONGDI~1`）能指到同一个文件，审计里记的是你写的那条路径而不是真实文件名 —— 仅影响「按名字拒绝」，不影响越界防护。
+
 ## 已知限制
 
 - **明文传输是默认形态**（TLS 需自签证书）；没有 token 轮换周期，只能吊销重建。

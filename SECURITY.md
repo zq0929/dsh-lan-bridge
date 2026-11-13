@@ -29,6 +29,13 @@ letters, Windows device names and symlink escapes are refused. Bytes are staged 
 place. Each committed upload and completed read is audited. Treat a `files` token like shell access
 to those directories: issue it only to a machine you would let run commands there.
 
+## Mirror requests cannot escalate (0.5.2)
+
+A mirror request is a request to mint a token, so it is bounded twice: the requested
+capabilities are intersected with the capabilities of the token that asked, and
+`autoAcceptMirror` only accepts requests that stay within `read` + `prompt`. Anything stronger
+waits for the operator in the panel, exactly as if auto-accept were off.
+
 ## Mirror pairing (0.5.0): accepting one hands out a token
 
 `pair.mirror` lets a paired peer *ask* to be paired back. The request does nothing

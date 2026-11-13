@@ -22,7 +22,7 @@ import { createApi } from '../lib/api.js'
 import { createServer } from '../lib/server.js'
 import { request as requestFn } from 'node:http'
 import { createPeerCache, createRemote } from '../lib/remote.js'
-import { installTools } from '../lib/tools.js'
+import { installTools, waitInRounds } from '../lib/tools.js'
 import { installUi } from '../lib/ui.js'
 import { createSettingsApplier, loadPersistedSettings } from '../lib/settings.js'
 import { localAddresses, resolveConfig } from '../lib/config.js'
@@ -1896,6 +1896,116 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   await store.revoke('files-peer')
   await store.revoke('files-reader')
   await rm(localDir, { recursive: true, force: true })
+}
+
+// --- sliced waiting ---
+{
+  // A single `session.wait` cannot outlive the fetch stack's header deadline, so
+  // the tool layer loops. Prove the loop: three rounds, cursor carried forward,
+  // records merged, and no round asks for more than one slice.
+  const rounds = []
+  const fakeRemote = {
+    async rpc(_target, method, params) {
+      rounds.push({ method, ...params })
+      if (rounds.length < 3) {
+        const cursor = rounds.length === 1 ? 10 : params.afterSeq
+        return { reason: 'timeout', running: true, cursor, records: [] }
+      }
+      return {
+        reason: 'idle',
+        running: false,
+        cursor: 32,
+        records: [{ event: { seq: 31, type: 'assistant/message' } }, { event: { seq: 32, type: 'turn/end' } }],
+      }
+    },
+  }
+  const target = { name: 'sliced', url: 'http://127.0.0.1:1' }
+  const value = await waitInRounds(fakeRemote, target, { sessionId: 's', afterSeq: 5 }, 120_000, undefined, 30)
+  check('sliced wait asks for one slice per round', rounds.every(r => r.timeoutMs <= 30), JSON.stringify(rounds.map(r => r.timeoutMs)))
+  check('sliced wait restarts from the cursor it was given', rounds[0].afterSeq === 5, JSON.stringify(rounds[0]))
+  check('sliced wait carries the cursor forward', rounds[1].afterSeq === 10, JSON.stringify(rounds[1]))
+  check('sliced wait stops on a non-timeout round', rounds.length === 3, String(rounds.length))
+  check('sliced wait reports the real reason', value.reason === 'idle', value.reason)
+  check('sliced wait merges the records it saw', value.records.length === 2, String(value.records.length))
+  check('sliced wait returns the newest cursor', value.cursor === 32, String(value.cursor))
+
+  // When every round times out the caller must still learn the budget ran out.
+  const always = { async rpc(_t, _m, params) { return { reason: 'timeout', running: false, cursor: params.afterSeq ?? 1, records: [] } } }
+  const spent = await waitInRounds(always, target, { sessionId: 's' }, 40, undefined, 15)
+  check('sliced wait gives up when the budget is spent', spent.reason === 'timeout' && spent.records.length === 0, spent.reason)
+}
+
+// --- audit follow-ups: what the cross-review found ------------------------
+{
+  steps.push('')
+  steps.push('mirror hardening')
+  const live = `http://127.0.0.1:${String(server.status.port)}`
+  const rpcAs = async (method, params, token) => {
+    const response = await fetch(`${live}/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id: 'it', method, params }),
+    })
+    return response.json()
+  }
+
+  // A read-only token must not be able to ask for more than it holds.
+  const reader = (await store.pair({ name: 'reader-peer', capabilities: ['read'] })).token
+  const escalate = await rpcAs('pair.mirror', { name: 'escalator', url: 'http://127.0.0.1:9', token: 'lzb_x', capabilities: ['approve'] }, reader)
+  equal('a mirror request cannot ask past its own capabilities', escalate.error?.code, 'bridge/bad-request')
+  const narrowed = await rpcAs('pair.mirror', { name: 'escalator', url: 'http://127.0.0.1:9', token: 'lzb_x', capabilities: ['read', 'approve', 'files'] }, reader)
+  equal('a mirror request is narrowed to the intersection', narrowed.result?.state, 'pending')
+  const narrowEntry = (await store.mirrors()).in.find(entry => entry.name === 'escalator')
+  equal('only the overlapping capability is recorded', (narrowEntry?.capabilities ?? []).join(','), 'read')
+
+  // Auto-accept may not hand out high-privilege capabilities.
+  const autoSave = cfg.autoAcceptMirror
+  cfg.autoAcceptMirror = true
+  const full = (await store.pair({ name: 'full-peer', capabilities: ['read', 'approve', 'files'] })).token
+  const risky = await rpcAs('pair.mirror', { name: 'risky', url: 'http://127.0.0.1:9', token: 'lzb_x', capabilities: ['approve'] }, full)
+  equal('auto-accept refuses to grant approve by itself', risky.result?.state, 'pending')
+  const safe = await rpcAs('pair.mirror', { name: 'tame', url: 'http://127.0.0.1:9', token: 'lzb_x', capabilities: ['read'] }, full)
+  equal('auto-accept still takes read-only requests', safe.result?.state, 'accepted')
+  cfg.autoAcceptMirror = autoSave
+
+  // A rotation that never reaches the peer must not leave it holding a dead token.
+  await store.addOutbound({ name: 'dead', url: 'http://127.0.0.1:1', token: 'lzb_deadbeefdeadbeefdeadbeefdeadbeef' })
+  const before = (await store.pair({ name: 'dead', capabilities: ['read'] })).record
+  let failed = false
+  try {
+    await requestMirror({ store, remote, cfg, server, peerName: 'dead', capabilities: ['read'] })
+  } catch {
+    failed = true
+  }
+  equal('an unreachable mirror request fails loudly', failed, true)
+  const after = (await store.inbound()).find(peer => peer.name === 'dead')
+  equal('a failed rotation keeps the previous token alive', (after?.capabilities ?? []).join(','), 'read')
+  equal('the previous token is the same record', after?.createdAt, before.createdAt)
+}
+
+{
+  steps.push('')
+  steps.push('upload hardening')
+  const live = `http://127.0.0.1:${String(server.status.port)}`
+  const token = (await store.pair({ name: 'upload-peer', capabilities: ['read', 'files'] })).token
+  const call = async (method, params) => {
+    const response = await fetch(`${live}/rpc`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dsh-bridge': '1', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ id: 'it', method, params }),
+    })
+    return response.json()
+  }
+  const payload = Buffer.from('late-arrival', 'utf8')
+  const digest = createHash('sha256').update(payload).digest('hex')
+  const begun = await call('files.begin', { root: 'drop', path: 'docs/late.txt', size: payload.length, sha256: digest, overwrite: false })
+  equal('upload begun for the conflict probe', begun.ok, true)
+  // Somebody else writes the path while our bytes are in flight.
+  await writeFile(join(filesRoot, 'docs', 'late.txt'), 'someone else wrote this first')
+  await call('files.chunk', { uploadId: begun.result.uploadId, index: 0, data: payload.toString('base64') })
+  const refused = await call('files.commit', { uploadId: begun.result.uploadId })
+  equal('commit re-checks overwrite instead of clobbering', refused.error?.code, 'bridge/conflict')
+  equal('the other writer keeps the file', await readFile(join(filesRoot, 'docs', 'late.txt'), 'utf8'), 'someone else wrote this first')
 }
 
 // --- audit ---------------------------------------------------------------

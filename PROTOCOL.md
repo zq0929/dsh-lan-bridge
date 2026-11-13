@@ -50,8 +50,8 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.5.0", "name": "my-mac",
-  "diskVersion": "0.5.0", "drift": false,
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.5.2", "name": "my-mac",
+  "diskVersion": "0.5.2", "drift": false,
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -271,8 +271,10 @@ Session; unknown ids answer `bridge/not-found`, a non-shared Session answers
 
 The relay is a bounded wait, not a replacement for the local UI: the bridge intercepts the
 approval ahead of the browser answerer, asks whichever peer holds an `approve` token, and
-falls back to the local prompt when no answer arrives within `approvalRelayMs` (default 120 s)
-or the request is cancelled. The Host's own `never` policy is applied before any answerer
+falls back to the local prompt when no answer arrives within `approvalRelayMs` (default 20 s)
+or the request is cancelled. Relaying also requires that the peer was heard from recently
+(within 10 minutes) — a granted capability is not the same as somebody being there, and waiting
+on an absent machine only delays the local dialog. The Host's own `never` policy is applied before any answerer
 runs, so it cannot be bypassed this way. Every remote decision is written to the audit log
 (`method: "approval.answer"`) before it is handed to the waterfall.
 
@@ -322,13 +324,40 @@ exists without `overwrite: true` is `bridge/conflict`.
 
 `files.begin` fails fast: unknown root (`bridge/not-found`), oversized (`bridge/bad-request`), and
 an existing target without `overwrite: true` (`bridge/conflict`). Bytes are staged under
-`<stateDir>/staging/` and only renamed into place after the declared `sha256` matches; a crash or
+`<stateDir>/staging/` and only moved into place after the declared `sha256` matches; a crash or
 an `abort` leaves nothing behind, and a stale `*.part` older than `stagingTtlMs` is swept on the
-next start. One upload per peer at a time (`bridge/rate-limited`). Every committed upload and
+next start.
+
+`files.commit` re-checks `overwrite` rather than trusting the promise made at `files.begin`: if the
+target appears while the bytes are in flight and the upload did not ask for `overwrite: true`, the
+commit is refused with `bridge/conflict` and the file that is already there is left untouched.
+Staging and the shared root may sit on different volumes (the normal Windows case); the move then
+copies into the target directory and renames, so the visible path still appears in one step. One upload per peer at a time (`bridge/rate-limited`). Every committed upload and
 every completed read is written to the audit log with `direction`, `root`, `path`, `bytes` and
 `sha256`.
 
+### Waiting longer than one HTTP call
+
+`maxWaitMs` may be larger than what a single fetch can hold open: the fetch stack gives up on
+response headers after 300 s and reports `UND_ERR_HEADERS_TIMEOUT`, which looks exactly like an
+offline peer. The bundled tools therefore wait in slices (`session.wait` twice, carrying
+`afterSeq` forward and merging `records`), and every RPC caps a single call at 240 s. Direct
+clients should do the same rather than passing a `timeoutMs` above ~4 minutes.
+
 ## Mirror pairing: `pair.mirror`, `pair.mirrorResult`, `pair.status` (0.5.0)
+
+Two rules constrain what a mirror request may ask for, and they exist because a
+mirror request is a token-minting path, not a note:
+
+- **A request may only ask for capabilities the calling token already holds.** The
+  bridge intersects the request with the caller's own capability list; asking for
+  more is not an error, it is silently narrowed, and if nothing survives the
+  intersection the call is `bridge/bad-request` with `details.held`.
+- **`autoAcceptMirror` never grants beyond `read` and `prompt`.** A request that
+  asks for `approve`, `files`, `create`, `archive`, `collab` or `control` stays
+  `pending` even with auto-accept on, because accepting it is an operator
+  decision, not a machine one.
+
 
 A pair is two independent secrets, one per direction. Mirroring turns that into
 one action: the machine that initiates a pair also asks the other one to pair
@@ -432,7 +461,7 @@ them. Prefix `/api/lan-bridge`.
 {
   "role": "both", "name": "my-mac",
   "listen": { "host": "127.0.0.1", "port": 5977, "protocol": "http", "listening": true, "error": null },
-  "version": { "running": "0.5.0", "disk": "0.5.0", "drift": false },
+  "version": { "running": "0.5.2", "disk": "0.5.2", "drift": false },
   "capabilities": ["read", "prompt", "control", "create", "archive", "collab"],
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
               "rateLimitPerMinute": 120, "allowPeersToCreateSessions": false },
