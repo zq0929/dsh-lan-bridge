@@ -50,8 +50,8 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.4.4", "name": "my-mac",
-  "diskVersion": "0.4.4", "drift": false,
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.5.0", "name": "my-mac",
+  "diskVersion": "0.5.0", "drift": false,
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -328,6 +328,42 @@ next start. One upload per peer at a time (`bridge/rate-limited`). Every committ
 every completed read is written to the audit log with `direction`, `root`, `path`, `bytes` and
 `sha256`.
 
+## Mirror pairing: `pair.mirror`, `pair.mirrorResult`, `pair.status` (0.5.0)
+
+A pair is two independent secrets, one per direction. Mirroring turns that into
+one action: the machine that initiates a pair also asks the other one to pair
+back, with **the same capability set**. The accepting machine never decides on
+its own — `pair.mirror` only creates a request that its operator sees in the
+panel (`设置 → 局域网桥接 → 对等端`), unless that machine turned on
+`autoAcceptMirror`.
+
+### `pair.mirror` → params `{ name, url, capabilities, token }` → `{ "ok": true, "state": "pending" | "accepted" }`
+
+Sent by the initiating machine. `token` is the credential the initiator just
+minted for this machine, so the accepting side can call back; `url` is the
+address it should dial; `capabilities` is the set that both directions will hold.
+
+Requires the `read` capability: any already-paired machine may *ask*, and the
+human on the receiving side decides. The request is recorded
+(`state = "pending"`), audited as `pair.mirror`, and listed by `pair.status` and
+in the panel. With `autoAcceptMirror: true` on the receiving machine the same
+call completes the handshake immediately and answers
+`{ "ok": true, "state": "accepted", "autoAccepted": true, "delivered": true }`.
+
+### `pair.mirrorResult` → params `{ name, url?, capabilities?, token }` → `{ "name": "…", "state": "accepted" }`
+
+Called by the accepting machine once its operator approved: `token` is *its* new
+credential for the initiator. The initiator stores an outbound peer pointing at
+the address it already knows, so from then on both sides can drive each other.
+Requires `read`, and only answers when an outgoing mirror for that `name` exists
+(`bridge/not-found` otherwise) — an unsolicited token is not silently adopted.
+
+### `pair.status` → params `{}` → `{ "in": [ … ], "out": [ … ] }`
+
+Both directions, newest first, tokens masked (`lzb_…1234`). Accepting or rejecting
+is deliberately **not** an RPC: it happens only in the panel, so a peer can never
+accept its own request.
+
 ### `session.cancel` → params `{ sessionId }` → `{ "accepted": true }`
 
 ### `session.rename` → params `{ sessionId, title }` → `{ "renamed": true }`
@@ -396,7 +432,7 @@ them. Prefix `/api/lan-bridge`.
 {
   "role": "both", "name": "my-mac",
   "listen": { "host": "127.0.0.1", "port": 5977, "protocol": "http", "listening": true, "error": null },
-  "version": { "running": "0.4.4", "disk": "0.4.4", "drift": false },
+  "version": { "running": "0.5.0", "disk": "0.5.0", "drift": false },
   "capabilities": ["read", "prompt", "control", "create", "archive", "collab"],
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
               "rateLimitPerMinute": 120, "allowPeersToCreateSessions": false },
@@ -406,6 +442,12 @@ them. Prefix `/api/lan-bridge`.
                  "capabilities": ["read", "prompt"] } ],
   "outbound": [ { "name": "peer-b", "url": "http://192.168.1.8:5977", "reachable": true,
                   "addedAt": 1762…, "error": null } ],
+  "mirrors": {
+    "in":  [ { "name": "peer-b", "url": "http://192.168.1.8:5977", "capabilities": ["read","prompt"],
+               "state": "pending", "at": 1762…, "token": "lzb_…a1b2" } ],
+    "out": [ { "name": "peer-a", "url": "http://192.168.1.9:5977", "capabilities": ["read","prompt"],
+               "state": "accepted", "at": 1762…, "token": "" } ]
+  },
   "sessions": [ { "sessionId": "…", "title": "…", "running": false, "updatedAt": 1762…, "cwd": "…", "shared": true } ],
   "workspaces": [
     { "workspaceId": "w-panel", "title": "panel-project", "path": "/home/dev/panel", "shared": true,
@@ -414,7 +456,8 @@ them. Prefix `/api/lan-bridge`.
     { "workspaceId": "ungrouped", "title": "Other sessions", "path": "", "shared": false, "sessions": [] }
   ],
   "settings": { "name": "my-mac", "host": "127.0.0.1", "port": 5977, "insecureHttp": false,
-                "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
+                "allowPeersToCreateSessions": true, "autoAcceptMirror": false,
+                "trustedHosts": ["mac.local:5977"],
                 "tls": null, "discovery": true },
   "discovery": { "enabled": true, "listening": true, "error": null,
                  "found": [ { "name": "my-pc", "host": "my-pc.local", "port": 5977,
@@ -479,6 +522,56 @@ capability is refused with `bridge/bad-request` and `details.field = "capabiliti
 that can do nothing is never what the operator meant. The panel also answers a refused
 mutation this way (`{ "ok": false, "error": { code, message, details } }`) instead of throwing.
 
+### `POST /api/lan-bridge.peer` — add, edit, probe or forget an outbound peer
+
+```json
+{ "action": "update", "name": "peer-b", "url": "http://192.168.1.44:5977", "token": "" }
+```
+
+| action | body | answer |
+|---|---|---|
+| `add` | `{ name, url, token }` | `{ ok: true, peer: { name, url, reachable, peerName?, capabilities? } }` |
+| `update` | `{ name, url?, token? }` | same; an omitted/empty `token` keeps the stored one, which is what the edit form sends when the operator only fixes an address |
+| `check` | `{ name }` | same shape, re-probed immediately (the 10s cache is cleared) |
+| `remove` | `{ name }` | `{ ok: <existed>, name, removed }` |
+
+This is the fix for "that machine took a new address": previously the only way to
+move a peer was a tool call from an agent. `url` must be `http(s)://…`, an
+explicit `token` must look like `lzb_…`; an unknown name answers
+`bridge/not-found`, and every accepted change is audited as `peer.<action>`.
+
+Notes a client needs, because they differ from a plain mutation:
+
+- **`check` uses `ok` for reachability, not for success.** An unreachable peer
+  answers `{ ok: false, peer: { name, url, reachable: false, error } }` with
+  HTTP 200 and *no* `error` object at the top level. Render `peer.error`, not a
+  generic failure.
+- **`remove`/`forget` report `ok` = "existed".** Deleting something that was not
+  there answers `ok: false`; a UI that treats `ok:false` as failure will report a
+  harmless click as an error. "Target state already holds" is the friendlier read.
+
+### `POST /api/lan-bridge.mirror` — decide a reverse-pairing request
+
+```json
+{ "action": "accept", "name": "peer-b" }
+```
+
+| action | meaning | answer |
+|---|---|---|
+| `accept` | store an outbound peer for the requester, mint our token for it with the same capabilities, and deliver that token back | `{ ok: true, name, state: "accepted", delivered: true }`; `delivered: false` with `error` means the peer could not be reached — accepting again mints a fresh token and retries |
+| `reject` | refuse a still-pending request (a non-pending one answers `bridge/bad-request`) | `{ ok: true, name, state: "rejected" }` |
+| `forget` | drop the record without touching the peer | `{ ok: <existed>, name }` |
+
+A record whose state is `accepted` **with** an `error` is the honest middle state:
+this machine has already stored the outbound peer and minted a token, but the
+requester has not received it yet (it was offline). Accepting again mints a fresh
+token and retries delivery, so a client can keep offering "retry" for exactly
+those rows. `mirrors.out` entries stay in the list after acceptance; only
+`pending` ones are waiting on somebody.
+
+Accepting is operator-only by design: it lives on the cookie-authenticated panel
+route, never on `/rpc`, so no peer can complete a pairing on its own behalf.
+
 ### `POST /api/lan-bridge.revoke` → `{ "name": "peer-a" }` → `{ "ok": true }`
 
 ### `POST /api/lan-bridge.settings` — the listening form
@@ -487,8 +580,8 @@ Body (every field optional; the panel sends the whole set):
 
 ```json
 { "name": "my-mac", "host": "0.0.0.0", "port": 5977, "insecureHttp": true,
-  "allowPeersToCreateSessions": true, "trustedHosts": ["mac.local:5977"],
-  "tls": null, "discovery": false }
+  "allowPeersToCreateSessions": true, "autoAcceptMirror": false,
+  "trustedHosts": ["mac.local:5977"], "tls": null, "discovery": false }
 ```
 
 Success returns the **full state object** above (so a save needs no second read):

@@ -19,8 +19,20 @@
 > 拿到一次性 token（`lzb_…`，只显示一次）后，把它和 A 机地址告诉我；我会用
 > `lan_dsh_peers action=add name=a url=http://<A机IP>:5977 token=lzb_…` 注册。
 > 注册完请用 `lan_dsh_peers action=check name=a` 确认 `reachable: true`。
+>
+> `action=add` 默认还会请 A 机**反向配对**（这样 A 也能驱动你）。A 机的操作员会看到一条
+> 「反向配对请求」，点接受后两边能力集一样；如果他没接受，你的 `action=mirrors` 里会看到
+> 状态是 `pending`，这不是失败。想只做单向就加 `mirror:false`。
 
 对 A 机操作的人（你）要做的事只有两件：**签 token**、**勾选要共享的会话**。
+
+---
+
+## 1.5 地址变了怎么办
+
+> 如果 A 机换了 IP，用 `lan_dsh_peers action=update name=a url=http://<新IP>:5977`
+> （只改地址、令牌不动）再 `action=check name=a`。不要重新 `add`，那会覆盖旧记录。
+> 也可以在你这台机器的面板「对等端」卡片里直接点「编辑」。
 
 ---
 

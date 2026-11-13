@@ -468,6 +468,31 @@ const STATE = {
   ],
 }
 
+/** A pending inbound mirror request and a peer waiting on an outbound one. */
+const MIRROR = {
+  in: [{
+    name: 'lead-mac',
+    url: 'http://172.17.46.12:5977',
+    capabilities: ['read', 'prompt'],
+    state: 'pending',
+    at: 1762000000000,
+    token: 'lzb_…c0de',
+  }],
+  out: [{
+    name: 'work-mac',
+    url: 'http://192.168.1.8:5977',
+    capabilities: ['read'],
+    state: 'pending',
+    at: 1762000000000,
+    token: '',
+  }],
+}
+
+/** STATE with a mirror layer, or without one to stand in for an older Host. */
+function withMirrors(mirrors) {
+  return { ...STATE, mirrors: mirrors === undefined ? MIRROR : mirrors }
+}
+
 function mount(props) {
   currentElement = React.createElement(section.component, props === undefined ? { t } : props)
   return currentElement
@@ -988,6 +1013,36 @@ function checkbox(nodes) {
   return findAll(nodes, (node) => node.type === 'input' && node.props.type === 'checkbox')
 }
 
+/** The outbound row of one peer, in view or editor mode. */
+function peerRow(nodes, name) {
+  return findAll(nodes, (node) => node.props['data-peer'] === name)[0] ?? null
+}
+
+/** The inbound mirror request from one peer. */
+function mirrorRow(nodes, name) {
+  return findAll(nodes, (node) => node.props['data-mirror'] === name)[0] ?? null
+}
+
+/** A button whose own text is exactly `label`, searched inside `nodes`. */
+function buttonLabelled(nodes, label) {
+  return findAll(nodes, (node) => node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && textOf([node]).trim() === label)[0] ?? null
+}
+
+/** The open peer form (the settings card has its own save button, so scope). */
+function peerForm(nodes) {
+  return byClass(nodes, 'dslb-peerForm')[0] ?? null
+}
+
+function peerWrites() {
+  return calls.filter((call) => call.url.endsWith('/api/lan-bridge.peer'))
+}
+
+function mirrorWrites() {
+  return calls.filter((call) => call.url.endsWith('/api/lan-bridge.mirror'))
+}
+
 async function type(label, value) {
   const field = inputByLabel(rendered, label)
   assert(field.length === 1, `field ${label} present (got ${field.length})`)
@@ -1112,6 +1167,7 @@ async function scenario_settings_save_outward() {
     port: 5977,
     insecureHttp: true,
     discovery: false,
+    autoAcceptMirror: false,
     allowPeersToCreateSessions: true,
     trustedHosts: ['mac.local:5977'],
     tls: null,
@@ -1619,6 +1675,340 @@ async function scenario_audit_collapse() {
   results.push('the audit log shows five rows by default and expands or collapses on demand')
 }
 
+async function scenario_peer_edit_save() {
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: STATE }))
+  mount()
+  await settle()
+  const row = peerRow(rendered, 'work-mac')
+  assert(row !== null, 'peer edit: the outbound row renders')
+  const edit = buttonLabelled([row], '编辑')
+  assert(edit !== null, 'peer edit: an edit button on the row')
+  edit.props.onClick()
+  await settle()
+  const form = peerForm(rendered)
+  assert(form !== null, 'peer edit: the form opens in place')
+  const url = inputByLabel(rendered, '地址')
+  assert(url.length === 1, 'peer edit: one address field')
+  assert(url[0].props.value === 'http://192.168.1.8:5799', 'peer edit: the current address is prefilled')
+  const token = inputByLabel(rendered, '令牌')
+  assert(token.length === 1, 'peer edit: a token field')
+  assert(token[0].props.value === '', 'peer edit: the token is never read back into the field')
+  assert(token[0].props.placeholder === '留空则保持原令牌', 'peer edit: the placeholder explains the blank')
+  url[0].props.onChange({ currentTarget: { value: 'http://192.168.1.9:5977' } })
+  await settle()
+  const save = buttonLabelled([peerForm(rendered)], '保存对等端')
+  assert(save !== null, 'peer edit: a save button inside the form')
+  save.props.onClick()
+  await settle()
+  const writes = peerWrites()
+  assert(writes.length === 1, `peer edit: one peer call (got ${writes.length})`)
+  assert(writes[0].method === 'POST', 'peer edit: POST')
+  assert(writes[0].body.action === 'update', 'peer edit: action update')
+  assert(writes[0].body.name === 'work-mac', 'peer edit: names the peer')
+  assert(writes[0].body.url === 'http://192.168.1.9:5977', 'peer edit: the typed address is sent')
+  assert(peerForm(rendered) === null, 'peer edit: the form collapses after saving')
+  assert(stateReads() >= 2, `peer edit: the panel re-reads instead of patching locally (reads: ${stateReads()})`)
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'peer edit: saving a peer is not an error')
+  results.push('editing an outbound peer posts {action:update, name, url, token} and re-reads the state')
+}
+
+async function scenario_peer_edit_token_kept() {
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: STATE }))
+  mount()
+  await settle()
+  buttonLabelled([peerRow(rendered, 'work-mac')], '编辑').props.onClick()
+  await settle()
+  const url = inputByLabel(rendered, '地址')
+  url[0].props.onChange({ currentTarget: { value: 'http://192.168.1.8:6000' } })
+  await settle()
+  buttonLabelled([peerForm(rendered)], '保存对等端').props.onClick()
+  await settle()
+  const writes = peerWrites()
+  assert(writes.length === 1, 'peer token: one call')
+  assert(writes[0].body.token === '', 'peer token: an untouched field is sent as the empty keep signal')
+  assert(writes[0].body.url === 'http://192.168.1.8:6000', 'peer token: the address still travels')
+  const secrets = findAll(rendered, (node) => node.type === 'input' && node.props.type === 'password'
+    && (node.props.value ?? '') !== '')
+  assert(secrets.length === 0, 'peer token: no stored token is ever rendered into a field')
+  results.push('an untouched token field keeps the stored token (sent as an empty string)')
+}
+
+async function scenario_peer_check_failure() {
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.peer')) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        body: { ok: false, peer: { name: 'work-mac', url: 'http://192.168.1.8:5799', reachable: false, error: 'ECONNREFUSED' } },
+      }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: STATE }
+  })
+  mount()
+  await settle()
+  const probe = buttonLabelled([peerRow(rendered, 'work-mac')], '测试连接')
+  assert(probe !== null, 'peer check: a probe button on the row')
+  probe.props.onClick()
+  await settle()
+  const writes = peerWrites()
+  assert(writes.length === 1 && writes[0].body.action === 'check', 'peer check: action check')
+  assert(writes[0].body.name === 'work-mac', 'peer check: names the peer')
+  const line = byClass(rendered, 'dslb-peerCheck')
+  assert(line.length === 1, `peer check: one result line (got ${line.length})`)
+  assert(line[0].props['data-tone'] === 'error', 'peer check: the line is toned as a failure')
+  const text = textOf([peerRow(rendered, 'work-mac')])
+  assert(text.includes('○ 不可达：ECONNREFUSED'), `peer check: the Host reason shows (got ${text})`)
+  assert(text.includes('可达'), 'peer check: the row keeps its own reachability title')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'peer check: a failed probe is reported in place, not as a page error')
+  results.push('a failed connection test shows ● / ○ plus the Host error on the row')
+}
+
+async function scenario_peer_add() {
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.peer')) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        body: { ok: true, peer: { name: 'bench-box', url: 'http://10.0.0.5:5977', reachable: false } },
+      }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: STATE }
+  })
+  mount()
+  await settle()
+  const add = buttonLabelled(rendered, '添加对等端')
+  assert(add !== null, 'peer add: an entry point at the bottom of the outbound block')
+  add.props.onClick()
+  await settle()
+  await type('名称', 'bench-box')
+  await type('地址', 'http://10.0.0.5:5977')
+  await type('令牌', 'lzb_newtoken')
+  buttonLabelled([peerForm(rendered)], '保存对等端').props.onClick()
+  await settle()
+  const writes = peerWrites()
+  assert(writes.length === 1, `peer add: one call (got ${writes.length})`)
+  assert(writes[0].body.action === 'add', 'peer add: action add')
+  assert(writes[0].body.name === 'bench-box', 'peer add: the typed name')
+  assert(writes[0].body.url === 'http://10.0.0.5:5977', 'peer add: the typed address')
+  assert(writes[0].body.token === 'lzb_newtoken', 'peer add: the typed token')
+  assert(peerForm(rendered) === null, 'peer add: the form closes on success')
+  const text = textOf(rendered)
+  assert(text.includes('已保存，但对方暂时没应答'), 'peer add: an unreachable answer says so')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'peer add: a quiet peer is not an error')
+  results.push('adding a peer posts {action:add, name, url, token} and warns when the other side is silent')
+}
+
+async function scenario_peer_remove_confirm() {
+  // Two clicks and a short fuse: the first click only arms the row, the
+  // question expires on its own, and the second click is what sends anything.
+  let removed = false
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.peer') && call.body !== undefined && call.body.action === 'remove') {
+      removed = true
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, name: 'work-mac', removed: true } }
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      body: removed ? { ...STATE, outbound: STATE.outbound.filter((peer) => peer.name !== 'work-mac') } : STATE,
+    }
+  })
+  mount()
+  await settle()
+  const row = peerRow(rendered, 'work-mac')
+  assert(row !== null, 'peer remove: the outbound row is there')
+  const ask = buttonLabelled([row], '移除')
+  assert(ask !== null, 'peer remove: a remove control next to 编辑')
+  assert(buttonLabelled([row], '确认移除') === null, 'peer remove: not armed before the first click')
+  ask.props.onClick()
+  await settle()
+  assert(peerWrites().length === 0, 'peer remove: the first click only arms the row')
+  const armed = peerRow(rendered, 'work-mac')
+  assert(buttonLabelled([armed], '确认移除') !== null, 'peer remove: the second click is spelled out')
+  assert(buttonLabelled([armed], '移除') === null, 'peer remove: the plain label is gone while armed')
+  const fuse = timeouts.filter((entry) => entry.ms === 5000 && entry.cleared === false)
+  assert(fuse.length === 1, `peer remove: one expiry timer (got ${fuse.length})`)
+  fuse[0].fn()
+  await settle()
+  const reverted = peerRow(rendered, 'work-mac')
+  assert(buttonLabelled([reverted], '移除') !== null, 'peer remove: the question expires back to 移除')
+  assert(peerWrites().length === 0, 'peer remove: an expired question sends nothing')
+  buttonLabelled([reverted], '移除').props.onClick()
+  await settle()
+  buttonLabelled([peerRow(rendered, 'work-mac')], '确认移除').props.onClick()
+  await settle()
+  const writes = peerWrites()
+  assert(writes.length === 1, `peer remove: exactly one call (got ${writes.length})`)
+  assert(writes[0].body.action === 'remove' && writes[0].body.name === 'work-mac', 'peer remove: posts remove for that peer')
+  assert(peerRow(rendered, 'work-mac') === null, 'peer remove: the row disappears once the Host confirms')
+  assert(peerRow(rendered, 'attic-box') !== null, 'peer remove: the other peer is untouched')
+  assert(textOf(rendered).includes('已移除对等端。'), 'peer remove: says what happened')
+  assert(stateReads() >= 2, 'peer remove: the list comes from a re-read, not from a local guess')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'peer remove: no alert on success')
+  results.push('removing a peer asks twice, expires by itself, sends nothing until confirmed, and reloads')
+}
+
+async function scenario_peer_remove_failure() {
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.peer') && call.body !== undefined && call.body.action === 'remove') {
+      return {
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        body: { ok: false, error: { code: 'bridge/forbidden', message: '这个对等端由配置文件管理，不能在面板里移除' } },
+      }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: STATE }
+  })
+  mount()
+  await settle()
+  buttonLabelled([peerRow(rendered, 'work-mac')], '移除').props.onClick()
+  await settle()
+  buttonLabelled([peerRow(rendered, 'work-mac')], '确认移除').props.onClick()
+  await settle()
+  const text = textOf(rendered)
+  assert(peerWrites().length === 1, 'peer remove failure: the call was made once')
+  assert(peerRow(rendered, 'work-mac') !== null, 'peer remove failure: the row stays')
+  assert(text.includes('移除失败'), 'peer remove failure: names the failure')
+  assert(text.includes('这个对等端由配置文件管理，不能在面板里移除'), 'peer remove failure: shows the Host sentence verbatim')
+  assert(buttonLabelled([peerRow(rendered, 'work-mac')], '移除') !== null, 'peer remove failure: the row is no longer armed')
+  assert(peerRow(rendered, 'attic-box') !== null, 'peer remove failure: the other row shows no error of its own')
+  assert(!text.includes('已移除对等端。'), 'peer remove failure: does not claim success')
+  results.push('a refused removal keeps the row, disarms it, and shows the Host sentence verbatim')
+}
+
+async function scenario_peer_check_ok() {
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.peer')) {
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        body: {
+          ok: true,
+          peer: { name: 'work-mac', url: 'http://192.168.1.8:5799', reachable: true, peerName: 'windows', capabilities: ['read', 'prompt'] },
+        },
+      }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: STATE }
+  })
+  mount()
+  await settle()
+  buttonLabelled([peerRow(rendered, 'work-mac')], '测试连接').props.onClick()
+  await settle()
+  const line = byClass(rendered, 'dslb-peerCheck')
+  assert(line.length === 1, 'peer probe: one result line')
+  assert(line[0].props['data-tone'] === 'ok', 'peer probe: a reachable answer is toned as success')
+  assert(textOf([line[0]]).includes('● 可达 as "windows"'), `peer probe: names the other machine (got ${textOf([line[0]])})`)
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'peer probe: a reply is not a page error')
+  results.push('a healthy connection test reports ● 可达 as the peer it announced itself')
+}
+
+async function scenario_mirror_accept() {
+  let reads = 0
+  const accepted = withMirrors({ in: [{ ...MIRROR.in[0], state: 'accepted' }], out: MIRROR.out })
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.mirror')) {
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, name: 'lead-mac', state: 'accepted', delivered: true } }
+    }
+    reads += 1
+    return { ok: true, status: 200, statusText: 'OK', body: reads === 1 ? withMirrors() : accepted }
+  })
+  mount()
+  await settle()
+  const row = mirrorRow(rendered, 'lead-mac')
+  assert(row !== null, 'mirror accept: the pending request renders')
+  const text = textOf([row])
+  assert(text.includes('lead-mac 请求与这台机器双向配对'), 'mirror accept: names the request')
+  assert(text.includes('接受后，对方可以调用本机，本机也用同一套权限调用对方'), 'mirror accept: spells out the consequence')
+  const accept = buttonLabelled([row], '接受')
+  assert(accept !== null, 'mirror accept: an accept button')
+  assert(buttonLabelled([row], '拒绝') !== null, 'mirror accept: a reject button')
+  accept.props.onClick()
+  await settle()
+  const writes = mirrorWrites()
+  assert(writes.length === 1, `mirror accept: one call (got ${writes.length})`)
+  assert(writes[0].body.action === 'accept', 'mirror accept: action accept')
+  assert(writes[0].body.name === 'lead-mac', 'mirror accept: names the peer')
+  assert(mirrorRow(rendered, 'lead-mac') === null, 'mirror accept: the answered request leaves the panel')
+  assert(textOf(rendered).includes('请求与这台机器双向配对') === false, 'mirror accept: no stale copy remains')
+  assert(stateReads() >= 2, 'mirror accept: the panel re-reads after answering')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'mirror accept: accepting is not an error')
+  results.push('accepting an inbound mirror posts {action:accept, name} and clears the request')
+}
+
+async function scenario_mirror_undelivered() {
+  // The Host keeps a request it could not deliver as `accepted` plus the error,
+  // so the retry row has to come back from the re-read, not from memory.
+  const stuck = withMirrors({ in: [{ ...MIRROR.in[0], state: 'accepted', error: 'connect ETIMEDOUT 172.17.46.12:5977' }], out: MIRROR.out })
+  let reads = 0
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.mirror')) {
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, name: 'lead-mac', state: 'accepted', delivered: false, error: 'connect ETIMEDOUT' } }
+    }
+    reads += 1
+    return { ok: true, status: 200, statusText: 'OK', body: reads === 1 ? withMirrors() : stuck }
+  })
+  mount()
+  await settle()
+  buttonLabelled([mirrorRow(rendered, 'lead-mac')], '接受').props.onClick()
+  await settle()
+  assert(mirrorWrites().length === 1, 'mirror undelivered: one accept call')
+  const text = textOf(rendered)
+  assert(text.includes('已接受，但对方暂时没收到，可稍后重试'), 'mirror undelivered: says the other side missed it')
+  assert(mirrorRow(rendered, 'lead-mac') !== null, 'mirror undelivered: the request stays on screen')
+  assert(byClass(rendered, 'dslb-mirrorRow').length === 1, 'mirror undelivered: exactly one row, no duplicate')
+  assert(stateReads() >= 2, 'mirror undelivered: the panel re-reads to pick the entry back up')
+  const retry = buttonLabelled([mirrorRow(rendered, 'lead-mac')], '重试')
+  assert(retry !== null, 'mirror undelivered: a retry control')
+  assert(buttonLabelled([mirrorRow(rendered, 'lead-mac')], '忽略') !== null, 'mirror undelivered: a way to drop it')
+  retry.props.onClick()
+  await settle()
+  assert(mirrorWrites().length === 2 && mirrorWrites()[1].body.action === 'accept', 'mirror undelivered: retrying re-posts accept')
+  results.push('an undelivered accept comes back from the state read as a retry row, and retrying re-posts accept')
+}
+
+async function scenario_mirrors_missing() {
+  reset(async () => ({ ok: true, status: 200, statusText: 'OK', body: STATE }))
+  mount()
+  await settle()
+  assert(byClass(rendered, 'dslb-mirrorRow').length === 0, 'mirrors missing: no request rows')
+  assert(textOf(rendered).includes('请求与这台机器双向配对') === false, 'mirrors missing: no request copy at all')
+  assert(byClass(rendered, 'dslb-peerWait').length === 0, 'mirrors missing: no waiting line under a peer')
+  assert(byClass(rendered, 'dslb-alert').length === 0, 'mirrors missing: an older Host is not an error')
+  const outbound = byClass(rendered, 'dslb-peerActions').length
+  assert(outbound === 2, `mirrors missing: the peers still render (got ${outbound})`)
+  results.push('a Host without the mirror layer renders no mirror UI and no error')
+}
+
+async function scenario_settings_auto_mirror() {
+  reset(async (call) => {
+    if (call.url.endsWith('/api/lan-bridge.settings')) {
+      const saved = withState({ settings: { ...LIVE_STATE.settings, autoAcceptMirror: true } })
+      return { ok: true, status: 200, statusText: 'OK', body: { ok: true, state: saved } }
+    }
+    return { ok: true, status: 200, statusText: 'OK', body: LIVE_STATE }
+  })
+  mount()
+  await settle()
+  const switches = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-switch')
+    && node.props['aria-label'] === '自动接受反向配对')
+  assert(switches.length === 1, `auto mirror: one switch (got ${switches.length})`)
+  assert(switches[0].props['aria-checked'] === 'false', 'auto mirror: off by default')
+  assert(textOf(rendered).includes('打开后，任何能连上本机的对等端都可以自助完成双向配对'), 'auto mirror: the risk is spelled out')
+  switches[0].props.onClick()
+  await settle()
+  saveButton(rendered).props.onClick()
+  await settle()
+  const writes = settingsWrites()
+  assert(writes.length === 1, 'auto mirror: one settings write')
+  assert(writes[0].body.autoAcceptMirror === true, 'auto mirror: the toggle travels with the settings set')
+  results.push('the auto-accept mirror switch saves with the settings set and names its risk')
+}
+
 const scenarios = [
   scenario_host_older_than_panel,
   scenario_loading,
@@ -1661,6 +2051,17 @@ const scenarios = [
   scenario_version_missing,
   scenario_audit_card,
   scenario_audit_collapse,
+  scenario_peer_edit_save,
+  scenario_peer_edit_token_kept,
+  scenario_peer_check_failure,
+  scenario_peer_check_ok,
+  scenario_peer_add,
+  scenario_peer_remove_confirm,
+  scenario_peer_remove_failure,
+  scenario_mirror_accept,
+  scenario_mirror_undelivered,
+  scenario_mirrors_missing,
+  scenario_settings_auto_mirror,
 ]
 
 let failed = 0

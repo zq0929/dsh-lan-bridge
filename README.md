@@ -135,10 +135,34 @@
 
 审计：A 的 `$DSH_HOME/lan-bridge/audit.jsonl` 每行一条 `{t, peer, method, sessionId, ok, ms}`。
 
-两个方向别混：**面板的“配对 peer”发的是入站 token**（别人来控我）；**出站**（我去控别人）只能在
-控制侧用 `lan_dsh_peers action=add` 加，把对方面板给的 URL+token 填进去。想给对方 `control`（取消/改名/
-切模型）或 `create`/`archive`/`collab`/`approve`/`files` 权限时，面板不够用，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]（要代答审批再加 `"approve"`）`
+两个方向别混：**面板的“配对 peer”发的是入站 token**（别人来控我）；**出站**（我去控别人）在你自己的
+面板「对等端」卡片里填 URL+token，或者用 `lan_dsh_peers action=add`。想给对方 `control`（取消/改名/
+切模型）或 `create`/`archive`/`collab`/`approve`/`files` 权限时，用 `lan_dsh_peers action=pair name=b-mac capabilities=["read","prompt","control","create","archive","collab"]（要代答审批再加 `"approve"`）`
 在 A 上签发，再把 token 交给 B。
+
+### 一次配对，两边都通（0.5.0 起）
+
+上面的流程要发两次令牌、在两台机器上各加一次对等端。0.5.0 起可以只做一次：
+
+1. B 面板「对等端」→ **添加对等端** → 填名字 / A 的地址 / A 给的那枚 token（或 agent 调
+   `lan_dsh_peers action=add …`，默认就带反向请求）。
+2. A 的面板顶部会出现一条**待确认的反向配对请求**：「b-mac 请求与这台机器双向配对（能力：read, prompt）」→
+   点 **接受**。接受即完成：A 会拿到 B 的地址与令牌，B 也会拿到 A 的一枚新令牌。
+3. 两边 `lan_dsh_peers action=list` 都能看到对方 `reachable`，且**两边的能力集完全一样**——就是发起方声明的那一套。
+
+要点：
+- 接受是**被控端操作员的决定**，不是对端能自己完成的（该动作只存在于面板路由，`/rpc` 里没有）。
+  A 若打开「自动接受反向配对」则跳过点击，但默认关闭：那等于把「谁来连我」的决定交给对面。
+- 拒绝会留下一条 `rejected` 记录（可「忽略」清掉），对方的令牌不会被回收，但也没拿到你的。
+- 反向配对用的是**发起方声明的能力集**，两边一样；想给不同权限就分别用 `action=pair` / `action=grant` 手工配。
+
+### 对端换了 IP？（0.5.0 起可以在面板里改）
+
+以前只能让 agent 调工具去改，因为面板只列不编辑。现在「对等端」卡片里每条出站记录都有 **编辑**：
+
+- **地址**：填新地址，**令牌留空**表示沿用原来的令牌 → 保存。下面的 `测试连接` 会立刻重探（不等 10 秒缓存）。
+- **令牌**：对方重新签发过就填新的（`lzb_…`）；不想留空又不想换就整行删掉重加。
+- 改名、删除也在同一处；地址写错不会静默——保存返回里带 `reachable: false` 与原因。
 
 ## 对端提示词
 
@@ -149,7 +173,7 @@
 
 | 工具 | 作用 |
 | --- | --- |
-| `lan_dsh_peers` | `list` / `add` / `check` / `remove`：配置与探测 peer；`pair`：**本机**签发一次性 token（可指定 `capabilities`；面板里也是各能力位随便勾）；`grant`：给**已配对**的对端原位改权限，不换 token |
+| `lan_dsh_peers` | `list` / `add` / `check` / `remove`：配置与探测 peer；`add` 默认还会请对方**反向配对**（`mirror:false` 关掉）；`update`：把已配对的对端挪到新地址或换 token（IP 变了用它）；`mirrors`：看双向配对请求的状态；`pair`：**本机**签发一次性 token（可指定 `capabilities`；面板里也是各能力位随便勾）；`grant`：给**已配对**的对端原位改权限，不换 token |
 | `lan_dsh_archive` | `archive` / `unarchive` 会话（`peer` 省略则作用于本机）；归档不删历史，可撤销；运行中的会话要 `stopActivity` 才归档 |
 | `lan_dsh_share` | `list` / `share` / `unshare`：**本机**会话共享开关（peer 永远不能调这个） |
 | `lan_dsh_sessions` | 列 peer 共享出来的会话 |

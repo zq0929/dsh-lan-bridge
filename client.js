@@ -19,7 +19,21 @@
  *                        carries, so a clamped port or a failed rebind shows up
  *                        in the same paint. No optimistic write, no re-read.
  *   3. `Peers`         — inbound / outbound sub-cards plus `Pairing` (a one-time
- *                        token, shown once, never persisted here)
+ *                        token, shown once, never persisted here). An outbound
+ *                        row edits in place (address prefilled, the token field
+ *                        always starts blank — blank means "keep the stored
+ *                        one") and can probe the peer; the two-way mirror
+ *                        handshake lives here too: a pending request from
+ *                        another machine is a grant in both directions, so it
+ *                        is listed with its consequence and 接受 / 拒绝, and a
+ *                        request this machine sent shows as a waiting line
+ *                        under its peer. A Host without a `mirrors` key renders
+ *                        none of it, and none of it is an error. Removing an
+ *                        outbound peer asks twice and the question expires by
+ *                        itself; inbound peers are revoked (their token), which
+ *                        is a different thing and keeps its own control.
+ *                        The token field on the pair form is the only place a
+ *                        secret is ever displayed, and only until dismissed.
  *   4. `Sessions`      — the panel's main decision surface: one collapsible row
  *                        per workspace (`WorkspaceGroup`, closed by default, a
  *                        switch that shares the whole workspace) over indented
@@ -248,6 +262,41 @@ window.__ModuleLoader__.load({
         auditEmpty: '还没有跨机调用',
         auditExpand: '展开全部 {count} 条',
         auditCollapse: '收起',
+        peerEdit: '编辑',
+        peerCheck: '测试连接',
+        peerSave: '保存对等端',
+        peerCancel: '取消',
+        peerName: '名称',
+        peerUrl: '地址',
+        peerToken: '令牌',
+        peerTokenKeep: '留空则保持原令牌',
+        peerUrlHint: '必须是 http:// 或 https:// 地址。',
+        peerAdd: '添加对等端',
+        peerCheckOk: '可达 as "{name}"',
+        peerCheckFailed: '不可达：{error}',
+        peerAddSaved: '已保存对等端。',
+        peerRemove: '移除',
+        peerRemoveConfirm: '确认移除',
+        peerRemoveHint: '移除后本机不再持有对方的令牌；对方仍然持有本机令牌，需要的话可以在对方面板里撤销。',
+        peerRemoveFailed: '移除失败',
+        peerRemoved: '已移除对等端。',
+        peerAddUnreachable: '已保存，但对方暂时没应答。',
+        peerAddFailed: '添加失败',
+        peerSaveFailed: '保存失败',
+        peerUrlInvalid: '地址必须以 http:// 或 https:// 开头。',
+        peerNameMissing: '请填写名称。',
+        peerTokenMissing: '添加对等端时必须填写令牌。',
+        mirrorIncoming: '{name} 请求与这台机器双向配对',
+        mirrorConsequence: '接受后，对方可以调用本机，本机也用同一套权限调用对方。',
+        mirrorAccept: '接受',
+        mirrorReject: '拒绝',
+        mirrorForget: '忽略',
+        mirrorRetry: '重试',
+        mirrorWaiting: '已请求双向配对，等待对方在它面板里接受',
+        mirrorUndelivered: '已接受，但对方暂时没收到，可稍后重试',
+        mirrorFailed: '配对请求失败：{message}',
+        settingsAutoMirror: '自动接受反向配对',
+        settingsAutoMirrorHint: '打开后，任何能连上本机的对等端都可以自助完成双向配对，不需要你点确认。',
         wsShareAll: '共享整个工作区',
         wsShareFailed: '工作区共享切换失败',
         wsExpandAll: '全部展开',
@@ -419,6 +468,41 @@ window.__ModuleLoader__.load({
         auditEmpty: 'No cross-machine calls yet',
         auditExpand: 'Show all {count}',
         auditCollapse: 'Collapse',
+        peerEdit: 'Edit',
+        peerCheck: 'Test connection',
+        peerSave: 'Save peer',
+        peerCancel: 'Cancel',
+        peerName: 'Name',
+        peerUrl: 'Address',
+        peerToken: 'Token',
+        peerTokenKeep: 'Leave empty to keep the current token',
+        peerUrlHint: 'Must be an http:// or https:// address.',
+        peerAdd: 'Add a peer',
+        peerCheckOk: 'reachable as "{name}"',
+        peerCheckFailed: 'unreachable: {error}',
+        peerAddSaved: 'Peer saved.',
+        peerRemove: 'Remove',
+        peerRemoveConfirm: 'Confirm removal',
+        peerRemoveHint: 'This machine forgets the other side token. The other side still holds a token for this machine; revoke it there if needed.',
+        peerRemoveFailed: 'Remove failed',
+        peerRemoved: 'Peer removed.',
+        peerAddUnreachable: 'Saved, but the peer did not answer yet.',
+        peerAddFailed: 'Add failed',
+        peerSaveFailed: 'Save failed',
+        peerUrlInvalid: 'The address must start with http:// or https://.',
+        peerNameMissing: 'Enter a name.',
+        peerTokenMissing: 'Adding a peer needs its token.',
+        mirrorIncoming: '{name} asks for two-way pairing with this machine',
+        mirrorConsequence: 'Accepting lets that machine call this one, and this one calls it back with the same permissions.',
+        mirrorAccept: 'Accept',
+        mirrorReject: 'Reject',
+        mirrorForget: 'Dismiss',
+        mirrorRetry: 'Retry',
+        mirrorWaiting: 'Two-way pairing requested; waiting for the other machine to accept it in its own panel',
+        mirrorUndelivered: 'Accepted, but the other machine has not received it yet; retry later',
+        mirrorFailed: 'Pairing request failed: {message}',
+        settingsAutoMirror: 'Accept reverse pairing automatically',
+        settingsAutoMirrorHint: 'When on, any peer that can reach this machine can complete two-way pairing on its own, without you confirming anything.',
         wsShareAll: 'Share the whole workspace',
         wsShareFailed: 'Workspace sharing failed',
         wsExpandAll: 'Expand all',
@@ -434,6 +518,8 @@ window.__ModuleLoader__.load({
       pair: 'api/lan-bridge.pair',
       revoke: 'api/lan-bridge.revoke',
       settings: 'api/lan-bridge.settings',
+      peer: 'api/lan-bridge.peer',
+      mirror: 'api/lan-bridge.mirror',
     }
 
     /** Poll cadence while the section is on screen and the document visible. */
@@ -642,6 +728,25 @@ window.__ModuleLoader__.load({
       '.dslb-rootWritable .dslb-switch{margin-top:6px}',
       '.dslb-rootActions{display:flex;align-items:flex-start;min-width:0;padding-top:22px}',
       '.dslb-rootFoot{display:flex;align-items:center;justify-content:flex-start;gap:12px;flex-wrap:wrap}',
+      // Peers: the inline editor, the probe answer and the mirror handshake.
+      '.dslb-peerForm{display:flex;flex-direction:column;gap:8px;min-width:0}',
+      '.dslb-peerFormGrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px 12px;min-width:0}',
+      '.dslb-peerFormSingle{display:grid;grid-template-columns:minmax(0,1fr);gap:8px 12px;min-width:0}',
+      '.dslb-peerFormActions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}',
+      '.dslb-peerState{display:flex;align-items:center;gap:8px;flex:none}',
+      '.dslb-peerActions{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}',
+      '.dslb-peerCheck{margin:0;font-size:12px;line-height:18px;overflow-wrap:anywhere;',
+      'color:var(--dsw-alias-label-secondary,#5b6270)}',
+      '.dslb-peerCheck[data-tone="ok"]{color:var(--dsw-alias-state-success-primary,#22c55e)}',
+      '.dslb-peerCheck[data-tone="error"]{color:var(--dsw-alias-state-error-primary,#ec1313)}',
+      '.dslb-peerWait{margin:0;overflow-wrap:anywhere}',
+      '.dslb-peerWait[data-tone="warn"]{',
+      'color:var(--dsw-alias-state-warn-label,var(--dsw-alias-state-warn-primary,#b45309))}',
+      '.dslb-row[data-wrap="1"]{align-items:flex-start;flex-wrap:wrap;row-gap:8px}',
+      '.dslb-mirrors{display:flex;flex-direction:column;gap:6px;min-width:0;margin-bottom:4px}',
+      '.dslb-mirrorRow{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;',
+      'box-sizing:border-box;min-width:0;padding:10px;',
+      'border:0.5px solid var(--dsw-alias-border-l2,rgba(128,128,128,.3));border-radius:var(--dsw-radius-lg,8px)}',
       '.dslb-formError{margin:2px 0 0;font-size:12px;line-height:18px;',
       'color:var(--dsw-alias-state-error-primary,#ec1313)}',
       '.dslb-inputMono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}',
@@ -769,6 +874,9 @@ window.__ModuleLoader__.load({
         trustedHosts: list(settings.trustedHosts).map((value) => text(value, '')).filter((value) => value !== ''),
         tls: tls === null ? null : { certFile: text(tls.certFile, ''), keyFile: text(tls.keyFile, '') },
         discovery: settings.discovery === true,
+        // Absent on a Host older than 0.5.0: off. Turning it on widens what any
+        // reachable peer can do, so the quiet default is the safe one.
+        autoAcceptMirror: settings.autoAcceptMirror === true,
         // Absent on an older Host: off, no roots, and the documented 256 MiB
         // default. That is a quiet state, never an error; a save fills it in.
         files: {
@@ -797,6 +905,7 @@ window.__ModuleLoader__.load({
       trustedHosts: [],
       tls: null,
       discovery: false,
+      autoAcceptMirror: false,
       files: { enabled: false, maxFileBytes: 0, chunkBytes: 0, stagingTtlMs: 0, roots: [] },
     }
 
@@ -954,6 +1063,32 @@ window.__ModuleLoader__.load({
           if (name === '') return null
           return { name, url: text(peer.url, ''), reachable: peer.reachable === true }
         }).filter((peer) => peer !== null),
+        // Mirrors are the two-way pairing requests: `in` asks this machine,
+        // `out` asks another one. `null` means the Host predates 0.5.0, and the
+        // whole mirror layer stays off the page instead of pretending to be empty.
+        mirrors: (() => {
+          const block = record(root.mirrors)
+          if (block === null) return null
+          const project = (entry) => {
+            const item = record(entry)
+            if (item === null) return null
+            const name = text(item.name, '')
+            if (name === '') return null
+            return {
+              name,
+              url: text(item.url, ''),
+              capabilities: list(item.capabilities).map((value) => text(value, '')).filter((value) => value !== ''),
+              state: text(item.state, ''),
+              at: typeof item.at === 'number' && Number.isFinite(item.at) ? item.at : null,
+              token: text(item.token, ''),
+              error: text(item.error, ''),
+            }
+          }
+          return {
+            in: list(block.in).map(project).filter((item) => item !== null),
+            out: list(block.out).map(project).filter((item) => item !== null),
+          }
+        })(),
         sessions: projectSessions(root.sessions),
         // The grouped view. `null` means "this Host does not group" (an older
         // Host, or a Host that failed to enumerate workspaces) and the panel
@@ -1131,6 +1266,7 @@ window.__ModuleLoader__.load({
         certFile: tls === null ? '' : tls.certFile,
         keyFile: tls === null ? '' : tls.keyFile,
         discovery: settings.discovery === true,
+        autoAcceptMirror: settings.autoAcceptMirror === true,
         files: {
           enabled: settings.files.enabled === true,
           maxMiB: mibFromBytes(settings.files.maxFileBytes),
@@ -1154,6 +1290,7 @@ window.__ModuleLoader__.load({
         && left.certFile === right.certFile
         && left.keyFile === right.keyFile
         && left.discovery === right.discovery
+        && left.autoAcceptMirror === right.autoAcceptMirror
         && sameFiles(left.files, right.files)
     }
 
@@ -1170,6 +1307,7 @@ window.__ModuleLoader__.load({
         tls === null ? '' : tls.certFile,
         tls === null ? '' : tls.keyFile,
         settings.discovery === true ? '1' : '0',
+        settings.autoAcceptMirror === true ? '1' : '0',
         settings.files.enabled ? '1' : '0',
         String(settings.files.maxFileBytes),
         settings.files.roots
@@ -1618,6 +1756,7 @@ window.__ModuleLoader__.load({
           port: portNumber,
           insecureHttp: draft.insecureHttp,
           discovery: draft.discovery,
+          autoAcceptMirror: draft.autoAcceptMirror,
           allowPeersToCreateSessions: draft.allowPeersToCreateSessions,
           trustedHosts: parseTrustedHosts(draft.trustedHosts),
           tls: tlsPresent ? { certFile, keyFile } : null,
@@ -1828,6 +1967,18 @@ window.__ModuleLoader__.load({
               label: t('settingsDiscovery'),
               disabled: saving,
               onChange: () => update('discovery', !draft.discovery),
+            })),
+          // Auto-accept widens trust, so the risk sentence sits under the
+          // switch itself instead of hiding in a tooltip.
+          h('div', { className: 'dslb-toggleRow' },
+            h('div', { className: 'dslb-main' },
+              h('div', { className: 'dslb-title' }, t('settingsAutoMirror')),
+              h('div', { className: 'dslb-desc' }, t('settingsAutoMirrorHint'))),
+            h(Switch, {
+              checked: draft.autoAcceptMirror,
+              label: t('settingsAutoMirror'),
+              disabled: saving,
+              onChange: () => update('autoAcceptMirror', !draft.autoAcceptMirror),
             }))),
 
         h('div', { className: 'dslb-formStack' },
@@ -2319,17 +2470,211 @@ window.__ModuleLoader__.load({
             }, t('revoke'))))
     }
 
-    /** One outbound peer: configured URL and the last probe result. */
+    /**
+     * The short form behind "edit" and "add": an address and a token. In edit
+     * mode the token field starts empty on purpose — the Host never reads a
+     * token back, so an empty field is how you say "keep the stored one"
+     * (`peerTokenKeep` is the placeholder). Nothing here blocks a submit that
+     * looks wrong beyond the http(s) prefix; the Host's own sentence is what a
+     * failed call shows.
+     */
+    function PeerForm(props) {
+      const { mode, t, initialName, initialUrl, busy, failure, onSubmit, onCancel } = props
+      const editing = mode === 'edit'
+      const [name, setName] = React.useState(editing ? initialName : '')
+      const [url, setUrl] = React.useState(initialUrl)
+      const [token, setToken] = React.useState('')
+      const [local, setLocal] = React.useState('')
+      const submit = () => {
+        const trimmedUrl = url.trim()
+        const trimmedName = name.trim()
+        if (trimmedUrl === '' || !/^https?:\/\/\S+$/i.test(trimmedUrl)) {
+          setLocal(t('peerUrlInvalid'))
+          return
+        }
+        if (!editing && trimmedName === '') {
+          setLocal(t('peerNameMissing'))
+          return
+        }
+        if (!editing && token.trim() === '') {
+          setLocal(t('peerTokenMissing'))
+          return
+        }
+        setLocal('')
+        onSubmit({ name: editing ? initialName : trimmedName, url: trimmedUrl, token: token.trim() })
+      }
+      const field = (label, input, hint) => h('label', { className: 'dslb-formField' },
+        h('span', { className: 'dslb-formLabel' }, label),
+        input,
+        hint === null ? null : h('span', { className: 'dslb-formHint' }, hint))
+      return h('div', { className: 'dslb-peerForm' },
+        h('div', { className: editing ? 'dslb-peerFormSingle' : 'dslb-peerFormGrid' },
+          editing
+            ? null
+            : field(t('peerName'), h('input', {
+              className: 'dslb-input',
+              value: name,
+              spellCheck: false,
+              disabled: busy,
+              'aria-label': t('peerName'),
+              onChange: (event) => setName(event.currentTarget.value),
+            }), null),
+          field(t('peerUrl'), h('input', {
+            className: 'dslb-input',
+            value: url,
+            spellCheck: false,
+            placeholder: 'http://192.168.1.8:5977',
+            disabled: busy,
+            'aria-label': t('peerUrl'),
+            onChange: (event) => setUrl(event.currentTarget.value),
+          }), t('peerUrlHint')),
+          field(t('peerToken'), h('input', {
+            className: 'dslb-input',
+            type: 'password',
+            value: token,
+            autoComplete: 'off',
+            spellCheck: false,
+            placeholder: editing ? t('peerTokenKeep') : 'lzb_…',
+            disabled: busy,
+            'aria-label': t('peerToken'),
+            onChange: (event) => setToken(event.currentTarget.value),
+          }), null)),
+        h('div', { className: 'dslb-peerFormActions' },
+          h('button', { type: 'button', className: 'dslb-btn', 'data-tone': 'primary', disabled: busy, onClick: submit },
+            t('peerSave')),
+          h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: onCancel },
+            t('peerCancel'))),
+        local === '' && failure === '' ? null : h('div', {
+          className: 'dslb-desc dslb-peerWait',
+          'data-tone': local === '' ? 'error' : 'warn',
+          role: 'alert',
+        }, local === '' ? failure : local))
+    }
+
+    /**
+     * One inbound mirror request. Accepting is a real grant in both directions,
+     * so the consequence sentence sits next to the buttons. A request that was
+     * answered but not delivered stays on screen with a retry, because the other
+     * machine has to hear about it before the pairing is live.
+     */
+    function MirrorRow(props) {
+      const { entry, t, busy, failure, undelivered, onAccept, onReject, onForget } = props
+      const rejected = entry.state === 'rejected'
+      let actions = null
+      if (rejected) {
+        actions = h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: () => onForget(entry) },
+          t('mirrorForget'))
+      } else if (undelivered) {
+        actions = h(React.Fragment, null,
+          h('button', { type: 'button', className: 'dslb-btn', 'data-tone': 'primary', disabled: busy, onClick: () => onAccept(entry) },
+            t('mirrorRetry')),
+          h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: () => onForget(entry) },
+            t('mirrorForget')))
+      } else {
+        actions = h(React.Fragment, null,
+          h('button', { type: 'button', className: 'dslb-btn', 'data-tone': 'primary', disabled: busy, onClick: () => onAccept(entry) },
+            t('mirrorAccept')),
+          h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: () => onReject(entry) },
+            t('mirrorReject')))
+      }
+      return h('div', { className: 'dslb-mirrorRow', 'data-mirror': entry.name },
+        h('div', { className: 'dslb-main' },
+          h('div', { className: 'dslb-title' },
+            h('span', { className: 'dslb-name' }, t('mirrorIncoming', { name: entry.name }))),
+          h('div', { className: 'dslb-desc' }, t('mirrorConsequence')),
+          undelivered ? h('div', { className: 'dslb-desc dslb-peerWait' }, t('mirrorUndelivered')) : null,
+          undelivered && entry.error !== '' ? h('div', {
+            className: 'dslb-desc dslb-peerWait',
+            'data-tone': 'warn',
+          }, entry.error) : null,
+          entry.capabilities.length === 0 ? null : h('div', { className: 'dslb-chips' },
+            entry.capabilities.map((capability, index) => h('span', {
+              key: `${capability}-${index}`,
+              className: 'dslb-chip',
+            }, capabilityLabel(capability, t)))),
+          failure === '' ? null : h('div', {
+            className: 'dslb-desc dslb-peerWait',
+            'data-tone': 'warn',
+            role: 'alert',
+          }, failure)),
+        h('div', { className: 'dslb-side' }, actions))
+    }
+
+    /**
+     * One outbound peer: where it answers, the last probe, an inline editor and
+     * a pending mirror request if this machine asked for a two-way pairing.
+     */
     function OutboundRow(props) {
-      const { peer, t } = props
-      return h('div', { className: 'dslb-row', 'data-quiet': '1' },
+      const {
+        peer, t, editing, removing, busy, failure, check, waiting,
+        onSubmit, onEdit, onCancelEdit, onCheck,
+        onAskRemove, onCancelRemove, onRemove,
+      } = props
+      const state = h('div', { className: 'dslb-peerState' },
+        h(Dot, { on: peer.reachable }),
+        h('span', { className: 'dslb-desc' }, peer.reachable ? t('reachable') : t('unreachable')))
+      if (editing) {
+        return h('div', { className: 'dslb-row', 'data-quiet': '1', 'data-wrap': '1', 'data-peer': peer.name },
+          h('div', { className: 'dslb-main' },
+            h('div', { className: 'dslb-title' }, h('span', { className: 'dslb-name' }, peer.name)),
+            h(PeerForm, {
+              mode: 'edit',
+              t,
+              initialName: peer.name,
+              initialUrl: peer.url,
+              busy,
+              failure,
+              onSubmit,
+              onCancel: onCancelEdit,
+            })),
+          state)
+      }
+      return h('div', { className: 'dslb-row', 'data-quiet': '1', 'data-wrap': '1', 'data-peer': peer.name },
         h('div', { className: 'dslb-main' },
           h('div', { className: 'dslb-title' }, h('span', { className: 'dslb-name' }, peer.name)),
           h('div', { className: 'dslb-desc', title: peer.url },
-            h('span', { className: 'dslb-mono' }, peer.url === '' ? t('empty') : peer.url))),
-        h('div', { className: 'dslb-side' },
-          h(Dot, { on: peer.reachable }),
-          h('span', { className: 'dslb-desc' }, peer.reachable ? t('reachable') : t('unreachable'))))
+            h('span', { className: 'dslb-mono' }, peer.url === '' ? t('empty') : peer.url)),
+          // A pending mirror under this peer is the other half of a pairing the
+          // operator started here; it disappears once the other side accepts.
+          waiting === null ? null : h('div', {
+            className: 'dslb-desc dslb-peerWait',
+            'data-tone': waiting.error === '' ? 'muted' : 'warn',
+          }, waiting.error === '' ? t('mirrorWaiting') : t('mirrorFailed', { message: waiting.error })),
+          check === null ? null : h('div', {
+            className: 'dslb-peerCheck',
+            'data-tone': check.ok ? 'ok' : 'error',
+          }, `${check.ok ? '●' : '○'} ${check.ok
+            ? t('peerCheckOk', { name: check.peerName === '' ? peer.name : check.peerName })
+            : t('peerCheckFailed', { error: check.error === '' ? t('unreachable') : check.error })}`),
+          failure === '' ? null : h('div', { className: 'dslb-desc', role: 'alert' }, failure)),
+        h('div', { className: 'dslb-side dslb-peerActions' },
+          state,
+          h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: () => onCheck(peer) },
+            t('peerCheck')),
+          h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: () => onEdit(peer) },
+            t('peerEdit')),
+          // Same two-step shape as revoking a token: the first click only
+          // changes the label, and the row reverts on its own after a few
+          // seconds, so a stray click cannot silently delete a peer.
+          removing
+            ? h(React.Fragment, null,
+              h('button', {
+                type: 'button',
+                className: 'dslb-btn',
+                'data-tone': 'danger',
+                disabled: busy,
+                title: t('peerRemoveHint'),
+                onClick: () => onRemove(peer),
+              }, t('peerRemoveConfirm')),
+              h('button', { type: 'button', className: 'dslb-btn', disabled: busy, onClick: onCancelRemove },
+                t('cancel')))
+            : h('button', {
+              type: 'button',
+              className: 'dslb-btn',
+              'data-tone': 'danger',
+              disabled: busy,
+              onClick: () => onAskRemove(peer),
+            }, t('peerRemove'))))
     }
 
     /**
@@ -2524,12 +2869,45 @@ window.__ModuleLoader__.load({
     }
 
     /** The peer inventory and everything that changes it. */
+    /**
+     * 3. Peer inventory: inbound credentials, outbound peers (each with an
+     * inline editor and a re-probe), the two-way mirror handshake, and the
+     * one-time token that creates a peer in the first place. Anything that
+     * changes a peer goes through the Host and then re-reads the state — the
+     * panel never recomputes a peer from what it hoped happened.
+     */
     function Peers(props) {
-      const { data, t } = props
+      const { data, t, reload } = props
       const [confirming, setConfirming] = React.useState('')
       const [busy, setBusy] = React.useState('')
       const [failure, setFailure] = React.useState({})
-      const { reload } = props
+      // Outbound editing/adding keep their own slots so an error next to one
+      // peer cannot leak into another row.
+      const [editing, setEditing] = React.useState('')
+      const [peerBusy, setPeerBusy] = React.useState('')
+      const [peerFailure, setPeerFailure] = React.useState('')
+      // A failure belongs to one row; without the name it would surface under
+      // whichever peer happens to be edited next.
+      const [peerFailureFor, setPeerFailureFor] = React.useState('')
+      // Removal asks twice, and the question expires: a row left in
+      // "confirm" state must not stay armed while the operator is elsewhere.
+      const [removeAsk, setRemoveAsk] = React.useState('')
+      const removeTimer = React.useRef(null)
+      const clearRemoveTimer = () => {
+        if (removeTimer.current === null) return
+        window.clearTimeout(removeTimer.current)
+        removeTimer.current = null
+      }
+      React.useEffect(() => clearRemoveTimer, [])
+      const [checks, setChecks] = React.useState({})
+      const [addOpen, setAddOpen] = React.useState(false)
+      const [addFailure, setAddFailure] = React.useState('')
+      const [addNotice, setAddNotice] = React.useState('')
+      // Mirrors answered but not delivered stay on screen under this map, so a
+      // retry is one click instead of "ask the other machine to try again".
+      const [mirrorBusy, setMirrorBusy] = React.useState('')
+      const [mirrorFailure, setMirrorFailure] = React.useState({})
+      const mirrors = data.mirrors
 
       const revoke = (peer) => {
         setBusy(peer.name)
@@ -2547,27 +2925,218 @@ window.__ModuleLoader__.load({
           })
       }
 
-      // 3. Peer inventory. Issuing and revoking credentials lives here because
-      // both sides of a pairing are one decision, and the token is only ever on
-      // screen in this card.
+      const updatePeer = (peer, values) => {
+        setPeerBusy(peer.name)
+        setPeerFailure('')
+        setPeerFailureFor(peer.name)
+        // An empty token means "keep the stored one": the Host never reads a
+        // token back, so the field is never prefilled.
+        void mutate(ROUTE.peer, {
+          action: 'update',
+          name: peer.name,
+          url: values.url,
+          token: values.token,
+        })
+          .then(() => {
+            setEditing('')
+            return reload()
+          })
+          .catch((error) => {
+            setPeerFailureFor(peer.name)
+            setPeerFailure(`${t('peerSaveFailed')}: ${describe(error)}`)
+          })
+          .finally(() => {
+            setPeerBusy('')
+          })
+      }
+
+      /**
+       * A probe answers `{ ok, peer }` where `ok` IS the reachability — an
+       * unreachable peer is a normal answer, not a refusal — so this one reads
+       * the body instead of going through `mutate`.
+       */
+      const checkPeer = (peer) => {
+        setPeerBusy(peer.name)
+        void requestJson(ROUTE.peer, { method: 'POST', body: JSON.stringify({ action: 'check', name: peer.name }) })
+          .then((response) => {
+            const answer = record(response.body) ?? {}
+            const info = record(answer.peer) ?? {}
+            const reason = text(info.error, '') || text(answer.error, '')
+            setChecks((previous) => ({
+              ...previous,
+              [peer.name]: {
+                ok: info.reachable === true,
+                peerName: text(info.peerName, ''),
+                error: reason,
+              },
+            }))
+            return reload()
+          })
+          .catch((error) => {
+            setChecks((previous) => ({
+              ...previous,
+              [peer.name]: { ok: false, peerName: '', error: describe(error) },
+            }))
+          })
+          .finally(() => {
+            setPeerBusy('')
+          })
+      }
+
+      const addPeer = (values) => {
+        setPeerBusy('+')
+        setAddFailure('')
+        void mutate(ROUTE.peer, {
+          action: 'add',
+          name: values.name,
+          url: values.url,
+          token: values.token,
+        })
+          .then((body) => {
+            const info = record(body.peer)
+            // Saved but silent is a distinct outcome: the credential is stored,
+            // the other machine just has not answered yet.
+            setAddNotice(info !== null && info.reachable === false ? 'unreachable' : 'saved')
+            setAddOpen(false)
+            return reload()
+          })
+          .catch((error) => {
+            setAddFailure(`${t('peerAddFailed')}: ${describe(error)}`)
+          })
+          .finally(() => {
+            setPeerBusy('')
+          })
+      }
+
+      const askRemove = (peer) => {
+        clearRemoveTimer()
+        setPeerFailure('')
+        setPeerFailureFor('')
+        setRemoveAsk(peer.name)
+        removeTimer.current = window.setTimeout(() => {
+          removeTimer.current = null
+          setRemoveAsk('')
+        }, 5000)
+      }
+
+      const cancelRemove = () => {
+        clearRemoveTimer()
+        setRemoveAsk('')
+      }
+
+      const removePeer = (peer) => {
+        clearRemoveTimer()
+        setRemoveAsk('')
+        setPeerBusy(peer.name)
+        setPeerFailure('')
+        setPeerFailureFor(peer.name)
+        void requestJson(ROUTE.peer, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'remove', name: peer.name }),
+        })
+          .then((response) => {
+            const answer = record(response.body) ?? {}
+            // `ok: false` with no error object means "there was nothing left to
+            // remove" — the outcome the operator asked for, not a failure.
+            if (answer.ok !== true && record(answer.error) !== null) {
+              throw mutationError(answer, response.status)
+            }
+            setAddNotice('removed')
+            setPeerBusy('')
+            setPeerFailureFor('')
+            return reload()
+          })
+          .catch((error) => {
+            setPeerFailureFor(peer.name)
+            setPeerFailure(`${t('peerRemoveFailed')}: ${describe(error)}`)
+          })
+          .finally(() => {
+            setPeerBusy('')
+          })
+      }
+
+      const mirrorAction = (entry, action) => {
+        setMirrorBusy(entry.name)
+        setMirrorFailure((previous) => ({ ...previous, [entry.name]: '' }))
+        const answered = action === 'forget'
+          // Forgetting an entry that is already gone answers `{ ok: false }`;
+          // that is the state we asked for, so it must not read as an error.
+          ? requestJson(ROUTE.mirror, { method: 'POST', body: JSON.stringify({ action, name: entry.name }) })
+            .then((response) => record(response.body) ?? {})
+          : mutate(ROUTE.mirror, { action, name: entry.name })
+        void answered
+          .then((body) => {
+            if (action === 'accept' && body.delivered === false) {
+              // The Host answered and kept the request with its error; the
+              // re-read brings back the same row, which explains itself and
+              // carries the retry.
+              return reload()
+            }
+            setMirrorFailure((previous) => ({ ...previous, [entry.name]: '' }))
+            return reload()
+          })
+          .catch((error) => {
+            setMirrorFailure((previous) => ({
+              ...previous,
+              [entry.name]: `${t('mirrorFailed')}: ${describe(error)}`,
+            }))
+          })
+          .finally(() => {
+            setMirrorBusy('')
+          })
+      }
+
+      // Everything this machine still owes an answer: a pending request, a
+      // refusal kept for the operator to dismiss, and one the Host accepted but
+      // could not deliver (it keeps the token and the error, so accepting again
+      // retries). Deriving all three from the payload means a page reload never
+      // loses a retry.
+      const mirrorRows = mirrors === null
+        ? []
+        : mirrors.in.filter((entry) => entry.state === 'pending'
+          || entry.state === 'rejected'
+          || (entry.state === 'accepted' && entry.error !== ''))
+      const waiting = {}
+      if (mirrors !== null) {
+        for (const entry of mirrors.out) {
+          if (entry.state !== 'pending') continue
+          waiting[entry.name] = entry
+        }
+      }
+      const inboundBody = data.inbound.length === 0 && mirrorRows.length === 0
+        ? h(Empty, { title: t('noInbound'), next: t('noInboundNext') })
+        : h('div', { className: 'dslb-list' }, data.inbound.map((peer) => h(InboundRow, {
+          key: peer.name,
+          peer,
+          t,
+          confirming: confirming === peer.name,
+          busy: busy === peer.name,
+          failure: text(failure[peer.name], ''),
+          onAsk: () => setConfirming(peer.name),
+          onCancel: () => setConfirming(''),
+          onRevoke: revoke,
+        })))
+      const mirrorBlock = mirrorRows.length === 0
+        ? null
+        : h('div', { className: 'dslb-mirrors' }, mirrorRows.map((entry) => h(MirrorRow, {
+          key: `mirror-${entry.name}`,
+          entry,
+          t,
+          busy: mirrorBusy === entry.name,
+          failure: text(mirrorFailure[entry.name], ''),
+          undelivered: entry.state === 'accepted',
+          onAccept: (mirror) => mirrorAction(mirror, 'accept'),
+          onReject: (mirror) => mirrorAction(mirror, 'reject'),
+          onForget: (mirror) => mirrorAction(mirror, 'forget'),
+        })))
+
       return h(Card, { title: t('peers'), hint: t('peersHint') },
         h('div', { className: 'dslb-subcard' },
           h('div', { className: 'dslb-subHead' },
             h('span', { className: 'dslb-subTitle' }, t('inbound')),
             h('span', { className: 'dslb-subHint' }, t('inboundHint'))),
-          data.inbound.length === 0
-            ? h(Empty, { title: t('noInbound'), next: t('noInboundNext') })
-            : h('div', { className: 'dslb-list' }, data.inbound.map((peer) => h(InboundRow, {
-              key: peer.name,
-              peer,
-              t,
-              confirming: confirming === peer.name,
-              busy: busy === peer.name,
-              failure: text(failure[peer.name], ''),
-              onAsk: () => setConfirming(peer.name),
-              onCancel: () => setConfirming(''),
-              onRevoke: revoke,
-            })))),
+          mirrorBlock,
+          inboundBody),
         h('div', { className: 'dslb-subcard' },
           h('div', { className: 'dslb-subHead' },
             h('span', { className: 'dslb-subTitle' }, t('outbound')),
@@ -2578,7 +3147,58 @@ window.__ModuleLoader__.load({
               key: peer.name,
               peer,
               t,
-            })))),
+              editing: editing === peer.name,
+              removing: removeAsk === peer.name,
+              busy: peerBusy === peer.name,
+              failure: peerFailureFor === peer.name ? peerFailure : '',
+              check: Object.prototype.hasOwnProperty.call(checks, peer.name) ? checks[peer.name] : null,
+              waiting: Object.prototype.hasOwnProperty.call(waiting, peer.name) ? waiting[peer.name] : null,
+              onSubmit: (values) => updatePeer(peer, values),
+              onEdit: () => {
+                setEditing(peer.name)
+                setPeerFailure('')
+              },
+              onCancelEdit: () => {
+                setEditing('')
+                setPeerFailure('')
+              },
+              onCheck: checkPeer,
+              onAskRemove: askRemove,
+              onCancelRemove: cancelRemove,
+              onRemove: removePeer,
+            }))),
+          h('div', { className: 'dslb-rootFoot' },
+            addNotice === ''
+              ? null
+              : h('span', { className: addNotice === 'unreachable' ? 'dslb-warn' : 'dslb-ok' },
+                t(addNotice === 'saved' ? 'peerAddSaved' : (addNotice === 'removed' ? 'peerRemoved' : 'peerAddUnreachable'))),
+            addOpen
+              ? null
+              : h('button', {
+                type: 'button',
+                className: 'dslb-btn',
+                disabled: peerBusy !== '',
+                onClick: () => {
+                  setAddOpen(true)
+                  setAddFailure('')
+                  setAddNotice('')
+                },
+              }, t('peerAdd'))),
+          addOpen
+            ? h(PeerForm, {
+              mode: 'add',
+              t,
+              initialName: '',
+              initialUrl: '',
+              busy: peerBusy !== '',
+              failure: addFailure,
+              onSubmit: addPeer,
+              onCancel: () => {
+                setAddOpen(false)
+                setAddFailure('')
+              },
+            })
+            : null),
         h(Pairing, { t, reload }))
     }
 

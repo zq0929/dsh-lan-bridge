@@ -29,6 +29,30 @@ letters, Windows device names and symlink escapes are refused. Bytes are staged 
 place. Each committed upload and completed read is audited. Treat a `files` token like shell access
 to those directories: issue it only to a machine you would let run commands there.
 
+## Mirror pairing (0.5.0): accepting one hands out a token
+
+`pair.mirror` lets a paired peer *ask* to be paired back. The request does nothing
+on its own: the accepting machine's operator must approve it in the panel (or the
+machine must have `autoAcceptMirror` on), and only then does that machine mint a
+token for the requester and store an outbound peer for it.
+
+Consequences worth stating plainly:
+
+- **Accept only requests you expected.** Approving means a machine you may never
+  have configured gets a bearer token for this Host, with the capability set the
+  request names. The panel shows the requesting name, address and capability set
+  before you decide.
+- **`autoAcceptMirror` is off by default**, because turning it on transfers the
+  decision "who may drive this machine" to whoever can reach the listener first.
+- **Capabilities are symmetric by design.** A mirror gives both directions the
+  set the initiator declared. If you want asymmetry, pair by hand instead.
+- Pairing replaces credentials: `pair`, `grant`-free re-pairing and every mirror
+  accept mint a fresh token for that peer name, which invalidates the previous
+  one. A third party holding the old token loses access — that is intended, and
+  it is why re-pairing is how you recover from a leaked token.
+- Accepting/rejecting lives only on the cookie-authenticated panel routes; there
+  is no RPC that lets a peer complete a pairing on its own behalf.
+
 ## Known, accepted limitations (not vulnerabilities)
 
 - **Plaintext HTTP is the default transport.** The panel refuses to expose a non-loopback address

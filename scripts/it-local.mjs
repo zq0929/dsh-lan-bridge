@@ -28,6 +28,7 @@ import { createSettingsApplier, loadPersistedSettings } from '../lib/settings.js
 import { localAddresses, resolveConfig } from '../lib/config.js'
 import { SERVICE, buildQuery, buildResponse, decodeName, encodeName, parsePacket } from '../lib/mdns.js'
 import { applyRulesToSession, materializeWorkspaceShares, pathKey, sessionGroups, setWorkspaceShare } from '../lib/workspaces.js'
+import { acceptMirror, rejectMirror, requestMirror } from '../lib/mirror.js'
 
 let failures = 0
 let passes = 0
@@ -824,7 +825,7 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('grant unknown peer refused', unknownGrant.ok, false)
   equal('grant unknown peer error code', unknownGrant.code, 'bridge/not-found')
 
-  const added = await exec('lan_dsh_peers', { action: 'add', name: 'loopback', url, token })
+  const added = await exec('lan_dsh_peers', { action: 'add', name: 'loopback', url, token, mirror: false })
   equal('peer add ok', added.ok, true)
   equal('peer add reachable', added.peers[0].reachable, true)
   const listedPeers = await exec('lan_dsh_peers', { action: 'list' })
@@ -859,7 +860,7 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   // works on this machine when `peer` is omitted.
   await exec('lan_dsh_share', { action: 'share', sessionId: target.summary.sessionId })
   const archivePeer = await exec('lan_dsh_peers', { action: 'pair', name: 'it-archiver', capabilities: ['read', 'archive'] })
-  await exec('lan_dsh_peers', { action: 'add', name: 'arch-peer', url, token: archivePeer.token })
+  await exec('lan_dsh_peers', { action: 'add', name: 'arch-peer', url, token: archivePeer.token, mirror: false })
   const toolArchived = await exec('lan_dsh_archive', { action: 'archive', peer: 'arch-peer', sessionId: target.summary.sessionId })
   equal('tool archive on a peer ok', toolArchived.ok, true)
   equal('tool archive reports archived', toolArchived.archived, true)
@@ -901,7 +902,7 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('goal tool writes', goalSet.goal.revision, goalBefore.goal.revision + 1)
   const goalRead = await exec('lan_dsh_goal', { action: 'get' })
   equal('goal tool reads back', goalRead.goal.title, 'wire the goal tool')
-  await exec('lan_dsh_peers', { action: 'add', name: 'board-peer', url, token: collabPeer.token })
+  await exec('lan_dsh_peers', { action: 'add', name: 'board-peer', url, token: collabPeer.token, mirror: false })
   const merged = await exec('lan_dsh_board', { peer: 'board-peer' })
   equal('board tool answers', merged.ok, true)
   const peerRow = merged.machines.find(machine => machine.name === 'board-peer')
@@ -1099,6 +1100,104 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   const boarded = await exec('lan_dsh_board', { peer: 'hand-peer' })
   check('reading the board converges the goal', (boarded.goalSync ?? []).some(entry => entry.applied === true), JSON.stringify(boarded.goalSync).slice(0, 200))
   equal('the board shows the converged text', boarded.goal.text, 'ahead')
+
+
+  // --- mirror pairing (one call, both directions, same capabilities) -------
+  // The point of the feature: the machine that was *called* ends up able to call
+  // back, with exactly the capabilities it also granted. Two real listeners, so
+  // the handshake is exercised over HTTP instead of through a stub.
+  // `requestMirror` mints a fresh inbound token for the peer each time, which
+  // revokes the one minted at setup — so the peer's own calls use the newest.
+  const freshPeerToken = async () => (await store.pair({ name: 'hand-peer', capabilities: ['read', 'prompt'] })).token
+  const mirrorCaps = ['read', 'prompt']
+
+  const asked = await requestMirror({
+    store, remote, cfg, server, peerName: 'hand-peer', capabilities: mirrorCaps,
+  })
+  equal('mirror request waits for the other operator', asked.state, 'pending')
+  equal('mirror request grants the same set locally', (await store.inbound()).find(p => p.name === 'hand-peer')?.capabilities?.join(','), mirrorCaps.join(','))
+  const peerIncoming = (await peerStore.mirrors()).in.find(entry => entry.name === cfg.name)
+  equal('the peer holds a pending incoming request', peerIncoming?.state, 'pending')
+  equal('the peer sees the capability set it would grant', peerIncoming.capabilities.join(','), mirrorCaps.join(','))
+  check('a mirror token is masked in the store view', typeof peerIncoming.token === 'string' && peerIncoming.token.startsWith('lzb_…'), String(peerIncoming?.token))
+  equal('this side records the request as outgoing', (await store.mirrors()).out.find(entry => entry.name === 'hand-peer')?.state, 'pending')
+
+  const accepted = await acceptMirror({ store: peerStore, remote: peerRemote, cfg: peerCfg, name: cfg.name })
+  equal('accepting reports the token was delivered', accepted.delivered, true)
+  check('the accepting machine can now call back', (await peerStore.outboundPeer(cfg.name))?.url === url, JSON.stringify(await peerStore.outboundPeer(cfg.name)))
+  equal('the initiator sees the mirror accepted', (await store.mirrors()).out.find(entry => entry.name === 'hand-peer')?.state, 'accepted')
+  const mainSide = (await store.inbound()).find(p => p.name === 'hand-peer')
+  const peerSide = (await peerStore.inbound()).find(p => p.name === cfg.name)
+  equal('both directions hold the same capabilities', mainSide?.capabilities?.join(','), peerSide?.capabilities?.join(','))
+  const backHello = await peerRemote.hello(await store.outboundPeer('hand-peer'))
+  equal('the reverse direction answers hello', backHello.name, 'hand-peer')
+
+  // auto-accept is a per-machine switch: turn it on and the request completes in
+  // one round trip, with no human in the loop on the accepting side.
+  peerCfg.autoAcceptMirror = true
+  await peerStore.removeMirror('in', cfg.name)
+  const auto = await requestMirror({ store, remote, cfg, server, peerName: 'hand-peer', capabilities: ['read'] })
+  equal('auto-accept completes the handshake', auto.state, 'accepted')
+  equal('auto-accept is reported as such', auto.autoAccepted, true)
+  equal('auto-accept narrowed the shared set', (await store.inbound()).find(p => p.name === 'hand-peer')?.capabilities?.join(','), 'read')
+  peerCfg.autoAcceptMirror = false
+
+  // refusal keeps the caller's token unusable but does not delete anything
+  await peerStore.removeMirror('in', cfg.name)
+  await requestMirror({ store, remote, cfg, server, peerName: 'hand-peer', capabilities: ['read'] })
+  const refused = await rejectMirror({ store: peerStore, name: cfg.name })
+  equal('rejecting records the refusal', refused.state, 'rejected')
+  equal('the initiator still sees a pending request', (await store.mirrors()).out.find(entry => entry.name === 'hand-peer')?.state, 'pending')
+
+  // an incoming request can be accepted from this machine's panel, and a peer
+  // cannot accept it on its own behalf (that route is cookie-authenticated only)
+  await peerRemote.rpc(
+    { name: 'hand-peer', url, token: await freshPeerToken() },
+    'pair.mirror',
+    { name: 'hand-peer', url: peerUrl, capabilities: ['read', 'prompt'], token: peerToken },
+  )
+  const incoming = (await uiCall('state')).mirrors.in.find(entry => entry.name === 'hand-peer')
+  check('the panel sees the incoming request', incoming?.state === 'pending', JSON.stringify(incoming))
+  const acceptedByPanel = await uiCall('mirror', { action: 'accept', name: 'hand-peer' })
+  equal('the panel accepts the incoming request', acceptedByPanel.ok, true)
+  // This request was injected directly, so the initiator holds no pending
+  // outgoing mirror; delivery therefore reports the peer's refusal honestly
+  // instead of pretending the token landed.
+  equal('a delivery that the peer cannot match is reported, not hidden', acceptedByPanel.delivered, false)
+  const afterPanel = (await store.mirrors()).in.find(entry => entry.name === 'hand-peer')
+  equal('the accepted request is no longer pending', afterPanel?.state, 'accepted')
+  const refusedByPanel = await uiCall('mirror', { action: 'reject', name: 'hand-peer' })
+  equal('an already accepted request cannot be rejected', refusedByPanel.ok, false)
+  equal('and says why', refusedByPanel.error.code, 'bridge/bad-request')
+
+  // editing an outbound peer is the fix for "that machine took a new address";
+  // the token may be left alone, which the panel form relies on.
+  equal('updating an unknown peer is refused', (await uiCall('peer', { action: 'update', name: 'nobody', url: 'http://127.0.0.1:9' })).error.code, 'bridge/not-found')
+  const edited = await uiCall('peer', { action: 'update', name: 'hand-peer', url: peerUrl })
+  equal('the panel edits an address in place', edited.ok, true)
+  equal('the address is the one given', edited.peer.url, peerUrl)
+  check('the token survived an address-only edit', typeof (await store.outboundPeer('hand-peer'))?.token === 'string', 'no token')
+  // Each accept mints a fresh token on the accepting side, so re-sync this
+  // machine's credential before probing: that is exactly what the panel's
+  // "edit address" form does when a peer rotated its token.
+  await store.addOutbound({
+    name: 'hand-peer',
+    url: peerUrl,
+    token: (await peerStore.pair({ name: cfg.name, capabilities: ['read', 'prompt'] })).token,
+  })
+  const probed = await uiCall('peer', { action: 'check', name: 'hand-peer' })
+  equal('testing a live peer succeeds', probed.ok, true)
+  const ghost = await uiCall('peer', { action: 'add', name: 'ghost', url: 'http://127.0.0.1:9', token: `lzb_${'a'.repeat(32)}` })
+  equal('adding an unreachable peer still saves it', ghost.ok, true)
+  equal('and says it does not answer', ghost.peer.reachable, false)
+  equal('removing a saved peer works', (await uiCall('peer', { action: 'remove', name: 'ghost' })).removed, true)
+  equal('tool update refuses an unknown peer', (await exec('lan_dsh_peers', { action: 'update', name: 'nobody', url: 'http://127.0.0.1:9' }).catch(error => error.code)), 'bridge/not-found')
+  const mirrorList = await exec('lan_dsh_peers', { action: 'mirrors' })
+  equal('the tool lists mirror attempts', Array.isArray(mirrorList.mirrors.in), true)
+  check('tool output never carries a bearer token', !JSON.stringify(mirrorList).includes(peerToken), 'token leaked')
+
+  await peerStore.removeMirror('in', cfg.name)
+  await store.removeMirror('out', 'hand-peer')
 
   await peerServer.stop()
   await rm(peerStateDir, { recursive: true, force: true })
