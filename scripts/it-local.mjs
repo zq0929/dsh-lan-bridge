@@ -28,7 +28,7 @@ import { createSettingsApplier, loadPersistedSettings } from '../lib/settings.js
 import { localAddresses, resolveConfig } from '../lib/config.js'
 import { SERVICE, buildQuery, buildResponse, decodeName, encodeName, parsePacket } from '../lib/mdns.js'
 import { applyRulesToSession, materializeWorkspaceShares, pathKey, sessionGroups, setWorkspaceShare } from '../lib/workspaces.js'
-import { acceptMirror, rejectMirror, requestMirror } from '../lib/mirror.js'
+import { acceptMirror, preferSameSubnet, rejectMirror, requestMirror, selfUrl } from '../lib/mirror.js'
 
 let failures = 0
 let passes = 0
@@ -1124,6 +1124,7 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
 
   const accepted = await acceptMirror({ store: peerStore, remote: peerRemote, cfg: peerCfg, name: cfg.name })
   equal('accepting reports the token was delivered', accepted.delivered, true)
+  equal('acceptance is recorded in both directions', (await peerStore.mirrors()).out.find(e => e.name === cfg.name)?.state, 'accepted')
   check('the accepting machine can now call back', (await peerStore.outboundPeer(cfg.name))?.url === url, JSON.stringify(await peerStore.outboundPeer(cfg.name)))
   equal('the initiator sees the mirror accepted', (await store.mirrors()).out.find(entry => entry.name === 'hand-peer')?.state, 'accepted')
   const mainSide = (await store.inbound()).find(p => p.name === 'hand-peer')
@@ -1141,6 +1142,15 @@ const other = fake.create({ sessionId: 'session-it-hidden', title: 'not shared' 
   equal('auto-accept is reported as such', auto.autoAccepted, true)
   equal('auto-accept narrowed the shared set', (await store.inbound()).find(p => p.name === 'hand-peer')?.capabilities?.join(','), 'read')
   peerCfg.autoAcceptMirror = false
+
+  // A machine with a VPN and a LAN address must announce the one the peer can
+  // actually route to, not whichever interface the OS happens to list first.
+  // 172.17.45.8 and 172.17.46.12 are different /24s behind one router, which is
+  // exactly the case where "first interface" guesses wrong.
+  equal('announcing prefers the peer\'s subnet', preferSameSubnet(['10.0.0.100', '172.17.46.12'], 'http://172.17.45.8:5977'), '172.17.46.12')
+  equal('announcing falls back to the first address', preferSameSubnet(['10.0.0.100'], 'http://192.168.1.8:5977'), '10.0.0.100')
+  equal('announcing falls back when the peer has no IPv4 host', preferSameSubnet(['10.0.0.100'], 'http://peer.local:5977'), '10.0.0.100')
+  equal('a wildcard bind never announces https without TLS', selfUrl({ listen: { host: '0.0.0.0' }, tls: null }, { status: { port: 5977, protocol: 'http' } }, undefined, peerUrl).startsWith('http://'), true)
 
   // refusal keeps the caller's token unusable but does not delete anything
   await peerStore.removeMirror('in', cfg.name)
