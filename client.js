@@ -93,7 +93,7 @@ window.__ModuleLoader__.load({
      * `state.version.running` only to warn that the page in front of you was
      * loaded from an older bundle than the Host is serving.
      */
-    const PANEL_VERSION = '0.4.4'
+    const PANEL_VERSION = '0.5.3'
 
     const DICT = {
       zh: {

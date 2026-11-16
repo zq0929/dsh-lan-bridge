@@ -33,6 +33,8 @@ jobs:
           node --check index.js
           node --check client.js
           Get-ChildItem lib/*.js, scripts/*.mjs | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit 1 } }
+      - name: the three version strings agree
+        run: node scripts/sync-version.mjs --check
       - name: offline integration suite
         run: node scripts/it-local.mjs
       - name: offline suite, mDNS on a scratch port (busy-port path)

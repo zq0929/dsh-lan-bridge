@@ -50,8 +50,8 @@ Error codes: `bridge/bad-request`, `bridge/unauthorized`, `bridge/forbidden`, `b
 
 ```json
 {
-  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.5.2", "name": "my-mac",
-  "diskVersion": "0.5.2", "drift": false,
+  "protocol": 1, "app": "dsh-lan-bridge", "version": "0.5.3", "name": "my-mac",
+  "diskVersion": "0.5.3", "drift": false,
   "capabilities": {
     "session.list": true, "session.state": true, "session.transcript": true,
     "session.prompt": true, "session.wait": true, "session.cancel": true,
@@ -461,7 +461,7 @@ them. Prefix `/api/lan-bridge`.
 {
   "role": "both", "name": "my-mac",
   "listen": { "host": "127.0.0.1", "port": 5977, "protocol": "http", "listening": true, "error": null },
-  "version": { "running": "0.5.2", "disk": "0.5.2", "drift": false },
+  "version": { "running": "0.5.3", "disk": "0.5.3", "drift": false },
   "capabilities": ["read", "prompt", "control", "create", "archive", "collab"],
   "limits": { "maxPromptBytes": 16384, "maxWaitMs": 600000, "maxMessages": 200,
               "rateLimitPerMinute": 120, "allowPeersToCreateSessions": false },

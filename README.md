@@ -375,6 +375,12 @@ discovered over mDNS:
 
 **已知未修**：8.3 短名（`LONGDI~1`）能指到同一个文件，审计里记的是你写的那条路径而不是真实文件名 —— 仅影响「按名字拒绝」，不影响越界防护。
 
+## 0.5.3：版本号只有一个来源
+
+面板自带一份版本常量（浏览器里的静态包读不到 `package.json`），所以 0.5.0–0.5.2 三次发版后，设置页上的徽章一直写着 `面板 0.4.4`——Host 是新的，面板自己报旧。
+
+现在 `package.json` 是唯一来源，`node scripts/sync-version.mjs` 一次把 `lib/config.js` 的 `VERSION` 与 `client.js` 的 `PANEL_VERSION` 对齐；`--check` 会在 CI 里失败，`panel-smoke` 也会断言两者一致。发版流程因此从「记得改三处」变成「改一处，跑一条命令」。
+
 ## 已知限制
 
 - **明文传输是默认形态**（TLS 需自签证书）；没有 token 轮换周期，只能吊销重建。

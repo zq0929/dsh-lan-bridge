@@ -1582,7 +1582,10 @@ async function scenario_version_drift() {
   assert(text.includes('Host 0.4.1'), 'version: the running version is on the status line')
   assert(text.includes('磁盘 0.4.5'), 'version: the disk version is named')
   assert(text.includes('重启后生效'), 'version: drift says a restart is what applies it')
-  assert(text.includes('面板 0.4.4'), 'version: a panel/Host mismatch is named')
+  // The panel names *itself* here, so the expected string comes from the bundle
+  // rather than a literal — that is what makes this assertion survive a release.
+  const panelVersion = SRC.match(/const PANEL_VERSION = '([^']+)'/)?.[1]
+  assert(panelVersion !== undefined && text.includes(`面板 ${panelVersion}`), 'version: a panel/Host mismatch is named')
   assert(byClass(rendered, 'dslb-alert').length === 0, 'version: drift is a warning, never an error bar')
   const warn = findAll(rendered, (node) => (node.props.className ?? '').split(/\s+/).includes('dslb-pill')
     && node.props['data-tone'] === 'warn')
@@ -2072,6 +2075,21 @@ for (const scenario of scenarios) {
   } catch (error) {
     failed += 1
     console.log(`FAIL ${scenario.name}: ${error.message}`)
+  }
+}
+
+// The panel ships its own copy of the version so a stale tab can say so. That copy
+// cannot read package.json, so guard it here: a release that bumps the package and
+// forgets the constant leaves a badge claiming an old panel (0.4.4 did exactly
+// that for three releases).
+{
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+  const found = SRC.match(/const PANEL_VERSION = '([^']+)'/)
+  if (found !== null && found[1] === pkg.version) {
+    console.log(`ok   panel version matches package.json (${pkg.version})`)
+  } else {
+    console.log(`FAIL panel version: client.js says ${found?.[1] ?? '?'}, package.json says ${pkg.version} (run node scripts/sync-version.mjs)`)
+    failed += 1
   }
 }
 
